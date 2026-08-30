@@ -1,0 +1,45 @@
+{
+  "群管配置": {
+    "description": "群管助手 GroupMaster 基础配置",
+    "hint": "权限范围、默认参数与拉黑拒绝理由。所有命令仅群聊可用。",
+    "type": "object",
+    "items": {
+      "warn_max": {
+        "description": "默认警告次数上限",
+        "hint": "用户被警告达到该次数自动移出群聊；可用 warn max <次数> 命令运行时修改",
+        "type": "int",
+        "default": 3
+      },
+      "extra_admins": {
+        "description": "额外管理员 QQ 号列表",
+        "hint": "除 AstrBot 管理员与群管理员/群主外，额外允许使用本插件命令的 QQ 号",
+        "type": "list",
+        "default": []
+      },
+      "default_mute_seconds": {
+        "description": "timeout 默认禁言秒数",
+        "hint": "timeout 命令未给数字时的默认时长",
+        "type": "int",
+        "default": 600
+      },
+      "max_mute_seconds": {
+        "description": "timeout 最大禁言秒数",
+        "hint": "钳制 timeout 的时长上限（QQ 平台上限 30 天 = 2592000 秒）",
+        "type": "int",
+        "default": 2592000
+      },
+      "recall_scan_limit": {
+        "description": "recall 历史扫描条数上限",
+        "hint": "按用户撤回消息时最多回扫多少条群历史消息",
+        "type": "int",
+        "default": 100
+      },
+      "reject_reason": {
+        "description": "拉黑入群拒绝理由",
+        "hint": "被 ban 拉黑的用户再次申请入群时收到的拒绝提示",
+        "type": "string",
+        "default": "你已被本群拉黑，如有疑问请联系群管理"
+      }
+    }
+  }
+}

@@ -1,0 +1,7 @@
+name: astrbot_plugin_groupmaster
+display_name: 群管助手 GroupMaster
+desc: "仅群聊可用的群管插件：timeout/kick/ban/warn/recall/mute/admin，支持@或QQ号定位、跨群 all 批量执行、引用撤回与 LLM 自然语言兜底。"
+version: 1.0.0
+astrbot_version: ">=4.26"
+author: Wolfe
+repo: https://github.com/WolfeOvO/astrbot_plugin_groupmaster
