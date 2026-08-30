@@ -1,5 +1,5 @@
 """
-AstrBot 群管插件 astrbot_plugin_groupmaster v1.0.0
+AstrBot 群管插件 astrbot_plugin_groupmaster v1.0.1
 
 命令（仅群聊可用；群内需 @Bot 或唤醒前缀触发；"@"目标也可以直接输 QQ 号）：
   timeout [all] <秒数> <@用户>   禁言指定用户（秒）；all=机器人管理的所有群
@@ -72,11 +72,13 @@ def first_int(tokens: list) -> Optional[int]:
     return None
 
 
-def extract_target_qq(event: AstrMessageEvent, tokens: list, numeric_param_first: bool = False) -> str:
-    """定位目标 QQ。优先级：消息链 At 段（排除 bot 自身/全体）> 文本 @昵称(QQ号) > 裸数字 token。
+def extract_target_qq(event: AstrMessageEvent, tokens: list, numeric_param_first: bool = False, allow_self: bool = False) -> str:
+    """定位目标 QQ。优先级：消息链 At 段（默认排除 bot 自身/全体）> 文本 @昵称(QQ号) > 裸数字 token。
 
     numeric_param_first=True 表示第一个纯数字 token 是时间/条数参数而非目标
     （timeout/recall 命令里时间在前、目标在后）。
+    allow_self=True 时，若链中只 @ 了机器人自身且无其他目标，返回机器人 QQ
+    （供撤回机器人自己的消息等场景使用）。
     """
     self_id = ""
     try:
@@ -84,13 +86,23 @@ def extract_target_qq(event: AstrMessageEvent, tokens: list, numeric_param_first
     except Exception:
         pass
     # 1) 消息链中的 At 组件
+    self_seen = ""
     try:
         for comp in getattr(event.message_obj, "message", None) or []:
             qq = str(getattr(comp, "qq", "") or "")
-            if qq and qq not in ("all", self_id) and not qq.startswith("remove"):
-                return qq
+            if not qq:
+                continue
+            if qq == "all" or qq.startswith("remove"):
+                continue
+            if qq == self_id:
+                if allow_self and not self_seen:
+                    self_seen = qq
+                continue
+            return qq
     except Exception:
         pass
+    if self_seen:
+        return self_seen
     # 2) 文本中的 @昵称(QQ号)
     m = AT_RE.search(getattr(event, "message_str", "") or "")
     if m:
@@ -102,11 +114,46 @@ def extract_target_qq(event: AstrMessageEvent, tokens: list, numeric_param_first
     return nums[-1] if nums else ""
 
 
+def chain_has_at_self(event: AstrMessageEvent) -> bool:
+    """消息链中是否 @ 了机器人自身（第一个 @ 机器人不进 message_str，只能查链）。"""
+    try:
+        self_id = str(event.get_self_id() or "")
+        if not self_id:
+            return False
+        for comp in getattr(event.message_obj, "message", None) or []:
+            if str(getattr(comp, "qq", "") or "") == self_id:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def find_reply_id(event: AstrMessageEvent) -> Optional[str]:
+    """取引用消息 ID：Reply 是消息链中的组件（aiocqhttp 适配器把 reply 段 append 进 message）。"""
+    try:
+        for comp in getattr(event.message_obj, "message", None) or []:
+            tname = type(comp).__name__
+            ctype = str(getattr(comp, "type", "") or "")
+            if tname == "Reply" or ctype == "Reply":
+                rid = getattr(comp, "id", None)
+                if rid:
+                    return str(rid)
+    except Exception:
+        pass
+    # 兼容其他适配器可能挂载在属性上的情况
+    reply = getattr(event.message_obj, "reply", None)
+    if reply is not None:
+        rid = getattr(reply, "id", None)
+        if rid:
+            return str(rid)
+    return None
+
+
 @register(
     "astrbot_plugin_groupmaster",
     "Wolfe",
     "QQ群管插件：timeout/kick/ban/warn/recall/mute/admin，支持@或QQ号定位、跨群 all 批量执行与 LLM 自然语言兜底；仅群聊可用。",
-    "1.0.0",
+    "1.0.1",
     "",
 )
 class GroupMasterPlugin(Star):
@@ -363,18 +410,17 @@ class GroupMasterPlugin(Star):
         return True, f"已警告 {target}（{count}/{warn_max}）"
 
     async def _do_recall(self, event, gid, toks: list) -> Tuple[bool, str]:
-        # 1) 引用撤回（优先）
-        reply = getattr(event.message_obj, "reply", None)
-        rid = getattr(reply, "id", None) if reply is not None else None
+        # 1) 引用撤回（优先）：Reply 是消息链中的组件
+        rid = find_reply_id(event)
         if rid:
             try:
                 await self._ob(event, "delete_msg", message_id=int(rid))
                 return True, "已撤回引用的那条消息"
             except Exception as e:
                 return False, f"撤回引用消息失败: {e}"
-        # 2) 按条数撤回指定用户
+        # 2) 按条数撤回指定用户（允许目标是机器人自己，撤回 bot 的消息是合法的）
         count = first_int(toks) or 1
-        target = extract_target_qq(event, toks, numeric_param_first=True)
+        target = extract_target_qq(event, toks, numeric_param_first=True, allow_self=True)
         if not target:
             return False, "用法：引用消息 + recall；或 recall <条数> <@用户/QQ号>"
         ok, msg = await self._bot_gate(event, gid)
@@ -442,11 +488,15 @@ class GroupMasterPlugin(Star):
             dur = max(1, min(dur, max_dur))
             target = extract_target_qq(event, toks, numeric_param_first=True)
             if not target:
+                if chain_has_at_self(event):
+                    return False, "不能对机器人自己禁言。若要禁言他人：timeout <秒数> <@用户/QQ号>"
                 return False, "用法：timeout <秒数> <@用户/QQ号>"
             return await self._do_timeout(event, gid, target, dur)
         if op == "kick":
-            target = extract_target_qq(event, toks, numeric_param_first=False)
+            target = extract_target_qq(event, toks)
             if not target:
+                if chain_has_at_self(event):
+                    return False, "不能对机器人自己执行踢出。若要踢他人：kick <@用户/QQ号>"
                 return False, "用法：kick <@用户/QQ号>"
             return await self._do_kick(event, gid, target, blacklist=False)
         if op == "ban":
