@@ -1,5 +1,5 @@
 """
-AstrBot 群管插件 astrbot_plugin_groupmaster v1.0.2
+AstrBot 群管插件 astrbot_plugin_groupmaster v1.0.3
 
 命令（仅群聊可用；仅本群群主/管理员可使用；群内需 @Bot 或唤醒前缀触发；"@"目标也可以直接输 QQ 号）：
   timeout [all] <秒数> <@用户>   禁言指定用户（秒）；all=机器人管理的所有群
@@ -180,7 +180,7 @@ def find_reply_id(event: AstrMessageEvent) -> Optional[str]:
     "astrbot_plugin_groupmaster",
     "Wolfe",
     "QQ群管插件：timeout/kick/ban/warn/recall/mute/admin/status，支持@或QQ号定位、理由记录、跨群 all 批量执行与 LLM 自然语言兜底；仅群聊可用，仅本群群主/管理员可使用。",
-    "1.0.2",
+    "1.0.3",
     "",
 )
 class GroupMasterPlugin(Star):
@@ -829,8 +829,8 @@ class GroupMasterPlugin(Star):
         return ("✅ " if ok else "❌ ") + msg
 
     @llm_tool(name="gm_ban_user")
-    async def tool_ban(self, event: AstrMessageEvent, user_id: str):
-        """将当前群内指定用户移出群聊并拉黑（自动拒绝其后续入群申请）。user_id 为目标 QQ 号。仅群聊可用。"""
+    async def tool_ban(self, event: AstrMessageEvent, user_id: str, reason: str = ""):
+        """将当前群内指定用户移出群聊并拉黑（自动拒绝其后续入群申请）。user_id 为目标 QQ 号，reason 为可选理由（记入状态档案，status 可查）。仅群聊可用。"""
         gid = self._llm_group_gate(event)
         if not gid:
             return "该操作仅能在群聊中使用。"
@@ -838,7 +838,7 @@ class GroupMasterPlugin(Star):
         if err:
             return err
         try:
-            ok, msg = await self._do_kick(event, gid, str(user_id), blacklist=True)
+            ok, msg = await self._do_kick(event, gid, str(user_id), blacklist=True, reason=str(reason or "")[:100])
         except Exception as e:
             ok, msg = False, f"异常: {e}"
         return ("✅ " if ok else "❌ ") + msg
@@ -859,8 +859,8 @@ class GroupMasterPlugin(Star):
         return ("✅ " if ok else "❌ ") + msg
 
     @llm_tool(name="gm_warn_user")
-    async def tool_warn(self, event: AstrMessageEvent, user_id: str):
-        """给当前群内指定用户记一次警告；达到上限自动移出群聊。user_id 为目标 QQ 号。仅群聊可用。"""
+    async def tool_warn(self, event: AstrMessageEvent, user_id: str, reason: str = ""):
+        """给当前群内指定用户记一次警告；达到上限自动移出群聊。user_id 为目标 QQ 号，reason 为可选理由（记入状态档案，status 可查）。仅群聊可用。"""
         gid = self._llm_group_gate(event)
         if not gid:
             return "该操作仅能在群聊中使用。"
@@ -868,14 +868,14 @@ class GroupMasterPlugin(Star):
         if err:
             return err
         try:
-            ok, msg = await self._do_warn(event, gid, str(user_id))
+            ok, msg = await self._do_warn(event, gid, str(user_id), reason=str(reason or "")[:100])
         except Exception as e:
             ok, msg = False, f"异常: {e}"
         return ("✅ " if ok else "❌ ") + msg
 
     @llm_tool(name="gm_recall_user_messages")
-    async def tool_recall(self, event: AstrMessageEvent, user_id: str, count: int = 1):
-        """撤回当前群内指定用户最近的 N 条消息。user_id 为目标 QQ 号，count 为条数（1~50）。仅群聊可用。"""
+    async def tool_recall(self, event: AstrMessageEvent, user_id: str = "", count: int = 1):
+        """撤回当前群内的消息。引用某条消息并让模型调用本工具=撤回该条引用消息；否则撤回 user_id（目标 QQ 号）最近的 count 条消息（1~50）。仅群聊可用。"""
         gid = self._llm_group_gate(event)
         if not gid:
             return "该操作仅能在群聊中使用。"
@@ -883,7 +883,8 @@ class GroupMasterPlugin(Star):
         if err:
             return err
         try:
-            ok, msg = await self._do_recall(event, gid, [str(max(1, min(int(count), 50))), str(user_id)])
+            toks = [str(max(1, min(int(count), 50))), str(user_id)] if str(user_id or "").strip() else []
+            ok, msg = await self._do_recall(event, gid, toks)
         except Exception as e:
             ok, msg = False, f"异常: {e}"
         return ("✅ " if ok else "❌ ") + msg
@@ -935,6 +936,39 @@ class GroupMasterPlugin(Star):
         except Exception as e:
             ok, msg = False, f"异常: {e}"
         return msg
+
+    @llm_tool(name="gm_set_warn_max")
+    async def tool_warn_max(self, event: AstrMessageEvent, max_count: int):
+        """设定当前群管系统的全局警告次数上限（用户被警告达到该次数自动移出群聊）。max_count 为正整数。仅群聊可用。"""
+        gid = self._llm_group_gate(event)
+        if not gid:
+            return "该操作仅能在群聊中使用。"
+        err = await self._llm_perm_gate(event)
+        if err:
+            return err
+        n = int(max_count)
+        if n < 1:
+            return "❌ 警告上限必须 ≥ 1"
+        try:
+            ok, msg = await self._dispatch(event, "warn", gid, ["max", str(n)])
+        except Exception as e:
+            ok, msg = False, f"异常: {e}"
+        return ("✅ " if ok else "❌ ") + msg
+
+    @llm_tool(name="gm_clear_warn")
+    async def tool_warn_clear(self, event: AstrMessageEvent, user_id: str):
+        """清除当前群内指定用户的警告计数（撤销误警告）。user_id 为目标 QQ 号。仅群聊可用。"""
+        gid = self._llm_group_gate(event)
+        if not gid:
+            return "该操作仅能在群聊中使用。"
+        err = await self._llm_perm_gate(event)
+        if err:
+            return err
+        try:
+            ok, msg = await self._dispatch(event, "warn", gid, ["clear", str(user_id)])
+        except Exception as e:
+            ok, msg = False, f"异常: {e}"
+        return ("✅ " if ok else "❌ ") + msg
 
     # ---------------- 拉黑用户入群申请自动拒绝 ----------------
     @filter.event_message_type(filter.EventMessageType.ALL)
