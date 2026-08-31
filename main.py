@@ -1,22 +1,26 @@
 """
-AstrBot 群管插件 astrbot_plugin_groupmaster v1.0.1
+AstrBot 群管插件 astrbot_plugin_groupmaster v1.0.2
 
-命令（仅群聊可用；群内需 @Bot 或唤醒前缀触发；"@"目标也可以直接输 QQ 号）：
+命令（仅群聊可用；仅本群群主/管理员可使用；群内需 @Bot 或唤醒前缀触发；"@"目标也可以直接输 QQ 号）：
   timeout [all] <秒数> <@用户>   禁言指定用户（秒）；all=机器人管理的所有群
+  timeout 0 <@用户>              解除该用户的禁言
   kick  [all] <@用户>            将用户移出群聊
-  ban   [all] <@用户>            移出群聊并拉黑（自动拒绝其再次入群申请）
+  ban   [all] <@用户> [理由]     移出群聊并拉黑（自动拒绝其再次入群申请），理由存入记录
   unban [all] <@用户>            解除拉黑（允许重新入群）
-  warn  [all] <@用户>            警告次数+1，达到上限自动移出群聊
+  warn  [all] <@用户> [理由]     警告次数+1，达到上限自动移出群聊，理由存入记录
   warn  max <次数>               设定全局警告次数上限
+  warn  clear <@用户>            清除该用户的警告计数
   （引用一条消息）+ recall        撤回被引用的消息
-  recall [all] <条数> <@用户>    撤回该用户最近 N 条消息
+  recall [all] <条数> <@用户>    撤回该用户最近 N 条消息（允许目标为机器人）
   mute  [all]                    单发一次开关全员禁言（toggle）
   admin set/remove <@用户>       设置/取消群管理员（需机器人为群主）
+  status [/@用户/QQ号]           查询本群禁言剩余/警告计数/拉黑名单与理由；带目标=查该用户档案
   @Bot + 自然语言                未命中命令时走 LLM，调用本插件注册的 llm_tool 完成同套操作
 
 OneBot(NapCat) 动作：set_group_ban / set_group_kick / delete_msg /
 set_group_whole_ban / set_group_admin / set_group_add_request /
-get_group_member_info / get_group_list / get_group_msg_history / get_group_setting
+get_group_member_info / get_group_list / get_group_msg_history / get_group_setting /
+get_group_shut_list
 """
 
 import json
@@ -35,7 +39,7 @@ from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 logger = logging.getLogger("astrbot")
 LOG = "[groupmaster]"
 
-COMMAND_NAMES = {"timeout", "kick", "ban", "unban", "warn", "recall", "mute", "admin"}
+COMMAND_NAMES = {"timeout", "kick", "ban", "unban", "warn", "recall", "mute", "admin", "status"}
 OP_NAMES = {
     "timeout": "禁言",
     "kick": "踢出",
@@ -45,6 +49,7 @@ OP_NAMES = {
     "recall": "撤回",
     "mute": "全员禁言",
     "admin": "管理员设置",
+    "status": "状态查询",
 }
 # @昵称(QQ号) / @(QQ号)（空昵称）/ @任意字符(QQ号)
 AT_RE = re.compile(r"@\S*?\((\d{5,12})\)")
@@ -114,6 +119,28 @@ def extract_target_qq(event: AstrMessageEvent, tokens: list, numeric_param_first
     return nums[-1] if nums else ""
 
 
+def extract_reason(tokens: list, last_target: str = "") -> str:
+    """取理由：目标（@昵称(QQ号) 或裸 QQ 号）token 之后的剩余文本，整体拼接。
+
+    last_target 是解析出的目标 QQ 号，用于在裸 QQ 号形式下定位起点。
+    """
+    toks = [t for t in tokens or [] if t]
+    start = 0
+    for i, t in enumerate(toks):
+        m = AT_RE.search(t)
+        if m and m.group(1):
+            start = i + 1
+            break
+        if last_target and t == last_target:
+            start = i + 1
+            break
+    else:
+        # 没找到目标 token：跳过开头的命令残留（如 warn/ban/clear/max/数字），其余当理由
+        start = 0
+    reason = " ".join(toks[start:]).strip()
+    return reason
+
+
 def chain_has_at_self(event: AstrMessageEvent) -> bool:
     """消息链中是否 @ 了机器人自身（第一个 @ 机器人不进 message_str，只能查链）。"""
     try:
@@ -152,8 +179,8 @@ def find_reply_id(event: AstrMessageEvent) -> Optional[str]:
 @register(
     "astrbot_plugin_groupmaster",
     "Wolfe",
-    "QQ群管插件：timeout/kick/ban/warn/recall/mute/admin，支持@或QQ号定位、跨群 all 批量执行与 LLM 自然语言兜底；仅群聊可用。",
-    "1.0.1",
+    "QQ群管插件：timeout/kick/ban/warn/recall/mute/admin/status，支持@或QQ号定位、理由记录、跨群 all 批量执行与 LLM 自然语言兜底；仅群聊可用，仅本群群主/管理员可使用。",
+    "1.0.2",
     "",
 )
 class GroupMasterPlugin(Star):
@@ -190,6 +217,8 @@ class GroupMasterPlugin(Star):
             state["warns"] = {}
         if not isinstance(state.get("bans"), dict):
             state["bans"] = {}
+        if not isinstance(state.get("reasons"), dict):
+            state["reasons"] = {}
         return state
 
     def _save_state(self):
@@ -232,24 +261,10 @@ class GroupMasterPlugin(Star):
             logger.warning(f"{LOG} get_group_member_info 失败: {e}")
         return ""
 
-    def _is_extra_admin(self, event: AstrMessageEvent) -> bool:
-        try:
-            ids = [str(x) for x in (self.config.get("extra_admins") or [])]
-            return str(event.get_sender_id()) in ids
-        except Exception:
-            return False
-
     async def _authorized(self, event: AstrMessageEvent) -> bool:
-        """发送者需为 AstrBot 管理员 / 插件额外管理员 / 群管理员或群主。"""
+        """权限门：仅本群群主/管理员可使用（get_group_member_info 实时校验群角色，查询失败即拒绝）。"""
         if not self._is_group(event):
             return False
-        try:
-            if event.is_admin():
-                return True
-        except Exception:
-            pass
-        if self._is_extra_admin(event):
-            return True
         role = await self._role_of(event, event.get_group_id(), event.get_sender_id())
         return role in ("admin", "owner")
 
@@ -359,11 +374,13 @@ class GroupMasterPlugin(Star):
             return False, msg
         try:
             await self._ob(event, "set_group_ban", group_id=int(gid), user_id=int(target), duration=dur)
+            if dur <= 0:
+                return True, f"已解除 {target} 的禁言"
             return True, f"已禁言 {target} {dur} 秒"
         except Exception as e:
             return False, f"禁言失败: {e}"
 
-    async def _do_kick(self, event, gid, target: str, blacklist: bool) -> Tuple[bool, str]:
+    async def _do_kick(self, event, gid, target: str, blacklist: bool, reason: str = "") -> Tuple[bool, str]:
         if target == str(event.get_self_id()):
             return False, "不能对机器人自己执行该操作"
         ok, msg = await self._bot_gate(event, gid)
@@ -376,8 +393,12 @@ class GroupMasterPlugin(Star):
             )
             if blacklist:
                 self.state.setdefault("bans", {}).setdefault(str(gid), {})[str(target)] = int(time.time())
+                try:
+                    self.state.setdefault("reasons", {}).setdefault(str(gid), {})[f"ban:{target}"] = {"t": int(time.time()), "r": reason[:100]}
+                except Exception:
+                    pass
                 self._save_state()
-                return True, f"已将 {target} 移出群聊并拉黑（后续入群申请将被自动拒绝）"
+                return True, f"已将 {target} 移出群聊并拉黑（后续入群申请将被自动拒绝）" + (f"｜理由：{reason}" if reason else "")
             return True, f"已将 {target} 移出群聊"
         except Exception as e:
             return False, f"踢出失败: {e}"
@@ -390,24 +411,31 @@ class GroupMasterPlugin(Star):
         self._save_state()
         return True, f"已解除 {target} 的拉黑（可重新申请入群）"
 
-    async def _do_warn(self, event, gid, target: str) -> Tuple[bool, str]:
+    async def _do_warn(self, event, gid, target: str, reason: str = "") -> Tuple[bool, str]:
         if target == str(event.get_self_id()):
             return False, "不能对机器人自己执行该操作"
         warns = self.state.setdefault("warns", {}).setdefault(str(gid), {})
         count = int(warns.get(str(target), 0)) + 1
         warn_max = int(self.state.get("warn_max", 3) or 3)
+        # 理由与时间随计数一起持久化（status 查询可见；最多留最近 3 条）
+        try:
+            recs = self.state.setdefault("reasons", {}).setdefault(str(gid), {}).setdefault(f"warn:{target}", [])
+            recs.append({"t": int(time.time()), "r": reason[:100]})
+            self.state["reasons"][str(gid)][f"warn:{target}"] = recs[-3:]
+        except Exception:
+            pass
         if count >= warn_max:
             ok, msg = await self._do_kick(event, gid, target, blacklist=False)
             if ok:
                 warns[str(target)] = 0
                 self._save_state()
-                return True, f"警告 {target} {count}/{warn_max} 已达上限，已移出群聊"
+                return True, f"警告 {target} {count}/{warn_max} 已达上限，已移出群聊" + (f"（理由：{reason}）" if reason else "")
             warns[str(target)] = count
             self._save_state()
             return False, f"警告计数已存（{count}/{warn_max}），但移出失败: {msg}"
         warns[str(target)] = count
         self._save_state()
-        return True, f"已警告 {target}（{count}/{warn_max}）"
+        return True, f"已警告 {target}（{count}/{warn_max}）" + (f"｜理由：{reason}" if reason else "")
 
     async def _do_recall(self, event, gid, toks: list) -> Tuple[bool, str]:
         # 1) 引用撤回（优先）：Reply 是消息链中的组件
@@ -458,6 +486,113 @@ class GroupMasterPlugin(Star):
         except Exception as e:
             return False, f"切换全员禁言失败: {e}"
 
+    def _fmt_ts(self, ts) -> str:
+        try:
+            return time.strftime("%m-%d %H:%M", time.localtime(int(ts)))
+        except Exception:
+            return "?"
+
+    async def _do_status(self, event, gid, target: str = "") -> Tuple[bool, str]:
+        """本群状态查询：谁被禁言/禁言剩余时间、警告计数、拉黑名单与理由。仅同群群主/管理员可用。"""
+        lines = []
+        # 单人模式：status <@用户/QQ号> → 该用户在本群的完整管理档案
+        if target:
+            role = ""
+            card = ""
+            try:
+                res = await self._ob(event, "get_group_member_info", group_id=int(gid), user_id=int(target), no_cache=True)
+                data = res.get("data") if isinstance(res, dict) and isinstance(res.get("data"), dict) else res
+                if isinstance(data, dict):
+                    role = str(data.get("role", "") or "")
+                    card = str(data.get("card", "") or data.get("nickname", "") or "")
+            except Exception:
+                pass
+            role_cn = {"owner": "群主", "admin": "管理员", "member": "成员"}.get(role, role or "未知/已不在群")
+            lines.append(f"👤 {target}（{card or '无群名片'}）｜群身份：{role_cn}")
+            warns = self.state.get("warns", {}).get(str(gid), {})
+            warn_max = int(self.state.get("warn_max", 3) or 3)
+            w = int(warns.get(str(target), 0) or 0)
+            lines.append(f"⚠️ 警告：{w}/{warn_max}")
+            wrecs = self.state.get("reasons", {}).get(str(gid), {}).get(f"warn:{target}", [])
+            for rec in wrecs[-3:]:
+                lines.append(f"   📝 {self._fmt_ts(rec.get('t'))}｜{rec.get('r', '') or '（未附理由）'}")
+            if str(target) in self.state.get("bans", {}).get(str(gid), {}):
+                b = self.state.get("bans", {})[str(gid)][str(target)]
+                br = self.state.get("reasons", {}).get(str(gid), {}).get(f"ban:{target}", {}).get("r", "")
+                lines.append(f"🚫 已拉黑（{self._fmt_ts(b)}{'｜' + br if br else ''}），其入群申请会被自动拒绝")
+            muted = False
+            try:
+                res = await self._ob(event, "get_group_shut_list", group_id=int(gid))
+                data = res.get("data") if isinstance(res, dict) and isinstance(res.get("data"), dict) else res
+                if isinstance(data, dict) and str(target) in data:
+                    info = data[str(target)]
+                    b = int(info.get("b", 0)) if isinstance(info, dict) else int(info)
+                    remain = b - int(time.time())
+                    if remain > 0:
+                        h, m2 = remain // 3600, (remain % 3600) // 60
+                        lines.append(f"🔇 禁言中：剩余 {h}时{m2}分")
+                        muted = True
+            except Exception:
+                pass
+            if not muted and role:
+                lines.append("🔇 禁言：无")
+            return True, "\n".join(lines)
+        # 全群总览
+        # 1) 禁言列表（get_group_shut_list：NapCat 扩展，失败则提示不可查）
+        try:
+            res = await self._ob(event, "get_group_shut_list", group_id=int(gid))
+            data = res.get("data") if isinstance(res, dict) and isinstance(res.get("data"), dict) else res
+            if isinstance(data, dict):
+                now = int(time.time())
+                cnt = 0
+                for uid, info in data.items():
+                    try:
+                        b = int(info.get("b", 0)) if isinstance(info, dict) else int(info)
+                        remain = b - now
+                        if remain > 0:
+                            h, m2 = remain // 3600, (remain % 3600) // 60
+                            lines.append(f"🔇 {uid} 禁言剩余 {h}时{m2}分")
+                            cnt += 1
+                            if cnt >= 20:
+                                break
+                    except Exception:
+                        continue
+                if cnt == 0:
+                    lines.append("🔇 当前无人处于禁言中")
+            else:
+                lines.append("🔇 禁言列表：适配器未返回数据（NapCat 需较新版本）")
+        except Exception as e:
+            lines.append(f"🔇 禁言列表不可查（{str(e)[:60]}）")
+        # 2) 警告计数
+        warns = self.state.get("warns", {}).get(str(gid), {})
+        warn_max = int(self.state.get("warn_max", 3) or 3)
+        if warns:
+            warn_line = "｜".join(f"{uid}:{c}/{warn_max}" for uid, c in list(warns.items())[:20] if int(c or 0) > 0)
+            lines.append(f"⚠️ 警告记录：{warn_line if warn_line else '无在记用户'}")
+        else:
+            lines.append("⚠️ 警告记录：无")
+        # 3) 拉黑名单
+        bans = self.state.get("bans", {}).get(str(gid), {})
+        if bans:
+            bparts = []
+            for uid, ts in list(bans.items())[:20]:
+                reason = self.state.get("reasons", {}).get(str(gid), {}).get(f"ban:{uid}", {}).get("r", "")
+                bparts.append(f"{uid}（{self._fmt_ts(ts)}{'｜' + reason if reason else ''}）")
+            lines.append("🚫 拉黑：" + "、".join(bparts))
+        else:
+            lines.append("🚫 拉黑：无")
+        # 4) 最近警告理由
+        reasons = self.state.get("reasons", {}).get(str(gid), {})
+        wreasons = [(k, v) for k, v in reasons.items() if k.startswith("warn:") and v]
+        if wreasons:
+            parts = []
+            for k, v in wreasons[:20]:
+                uid = k[5:]
+                last = v[-1]
+                parts.append(f"{uid}（{self._fmt_ts(last.get('t'))}｜{last.get('r', '')}）")
+            lines.append("📝 最近警告理由：" + "、".join(parts))
+        return True, "\n".join(lines)
+
     async def _do_admin(self, event, gid, toks: list) -> Tuple[bool, str]:
         sub = (toks[0].lower() if toks else "")
         if sub not in ("set", "remove"):
@@ -484,13 +619,18 @@ class GroupMasterPlugin(Star):
                 max_dur = int(self.config.get("max_mute_seconds", 2592000) or 2592000)
             except Exception:
                 default_dur, max_dur = 600, 2592000
-            dur = first_int(toks) or default_dur
-            dur = max(1, min(dur, max_dur))
+            # 显式给了 0（或"0s/0秒"）= 解除禁言；未给数字才用默认时长。
+            # 注意 first_int 返回 None 表示未给数字，不能与 0 混淆（0 是合法撤销指令）。
+            if any(t.isdigit() and int(t) == 0 for t in toks):
+                dur = 0
+            else:
+                dur = first_int(toks) or default_dur
+                dur = max(1, min(dur, max_dur))
             target = extract_target_qq(event, toks, numeric_param_first=True)
             if not target:
                 if chain_has_at_self(event):
                     return False, "不能对机器人自己禁言。若要禁言他人：timeout <秒数> <@用户/QQ号>"
-                return False, "用法：timeout <秒数> <@用户/QQ号>"
+                return False, "用法：timeout <秒数> <@用户/QQ号>；timeout 0 <@用户> = 解除其禁言"
             return await self._do_timeout(event, gid, target, dur)
         if op == "kick":
             target = extract_target_qq(event, toks)
@@ -502,8 +642,9 @@ class GroupMasterPlugin(Star):
         if op == "ban":
             target = extract_target_qq(event, toks, numeric_param_first=False)
             if not target:
-                return False, "用法：ban <@用户/QQ号>"
-            return await self._do_kick(event, gid, target, blacklist=True)
+                return False, "用法：ban <@用户/QQ号> [理由]"
+            reason = extract_reason(toks, target)
+            return await self._do_kick(event, gid, target, blacklist=True, reason=reason)
         if op == "unban":
             target = extract_target_qq(event, toks, numeric_param_first=False)
             if not target:
@@ -517,14 +658,31 @@ class GroupMasterPlugin(Star):
                 self.state["warn_max"] = n
                 self._save_state()
                 return True, f"全局警告次数上限已设为 {n}"
+            # warn clear <@用户/QQ号>：清除该用户警告计数（撤销误警告）
+            if toks and toks[0].lower() == "clear":
+                target = extract_target_qq(event, toks[1:], numeric_param_first=False)
+                if not target:
+                    return False, "用法：warn clear <@用户/QQ号>"
+                warns = self.state.setdefault("warns", {}).setdefault(str(gid), {})
+                if str(target) not in warns:
+                    return False, f"{target} 没有警告记录"
+                old = warns.pop(str(target))
+                self._save_state()
+                return True, f"已清除 {target} 的警告记录（原 {old} 次）"
             target = extract_target_qq(event, toks, numeric_param_first=False)
             if not target:
-                return False, "用法：warn <@用户/QQ号> 或 warn max <次数>"
-            return await self._do_warn(event, gid, target)
+                return False, "用法：warn <@用户/QQ号> [理由] 或 warn max <次数> 或 warn clear <@用户/QQ号>"
+            reason = extract_reason(toks, target)
+            return await self._do_warn(event, gid, target, reason=reason)
         if op == "recall":
             return await self._do_recall(event, gid, toks)
         if op == "mute":
             return await self._do_mute(event, gid)
+        if op == "status":
+            target = extract_target_qq(event, toks, numeric_param_first=False)
+            if target == str(event.get_self_id()):
+                target = ""  # @bot = 查全群总览
+            return await self._do_status(event, gid, target)
         if op == "admin":
             return await self._do_admin(event, gid, toks)
         return False, f"未知操作: {op}"
@@ -536,9 +694,12 @@ class GroupMasterPlugin(Star):
             yield event.plain_result(f"⛔ [群管] {gate}")
             return
         if not await self._authorized(event):
-            yield event.plain_result("⛔ [群管] 权限不足：仅 AstrBot 管理员、插件额外管理员或群管理员/群主可使用。")
+            yield event.plain_result("⛔ [群管] 权限不足：仅本群群主/管理员可使用。")
             return
         _, toks = parse_command_tokens(event.message_str)
+        if op == "status" and toks and toks[0].lower() == "all":
+            yield event.plain_result("❌ [群管] status 仅查询单个群，不支持 all。")
+            return
         # 全局批量化：<命令> all ...（作用于机器人管理的所有群/为其群主的所有群）
         if toks and toks[0].lower() == "all" and op != "recall" or (op == "recall" and toks and toks[0].lower() == "all"):
             gtoks = toks[1:]
@@ -620,6 +781,12 @@ class GroupMasterPlugin(Star):
         async for r in self._run_command(event, "admin"):
             yield r
 
+    @filter.command("status")
+    async def cmd_status(self, event: AstrMessageEvent):
+        """status [@用户/QQ号]：查询本群禁言/警告/拉黑状态与理由，无参=全群总览（仅本群群主/管理员）。"""
+        async for r in self._run_command(event, "status"):
+            yield r
+
     # ---------------- LLM 工具（@Bot 自然语言兜底） ----------------
     def _llm_group_gate(self, event: AstrMessageEvent) -> Optional[str]:
         if event.is_private_chat() or not self._is_group(event):
@@ -628,12 +795,12 @@ class GroupMasterPlugin(Star):
 
     async def _llm_perm_gate(self, event: AstrMessageEvent) -> Optional[str]:
         if not await self._authorized(event):
-            return "权限不足：仅管理员可执行该操作。"
+            return "权限不足：仅本群群主/管理员可执行该操作。"
         return None
 
     @llm_tool(name="gm_timeout_user")
     async def tool_timeout(self, event: AstrMessageEvent, user_id: str, duration_sec: int = 600):
-        """禁言当前群内指定用户。user_id 为目标 QQ 号（从消息中的 @昵称(QQ号) 或用户提供的号码解析），duration_sec 为禁言秒数（1~2592000）。仅群聊可用。"""
+        """禁言当前群内指定用户。user_id 为目标 QQ 号（从消息中的 @昵称(QQ号) 或用户提供的号码解析），duration_sec 为禁言秒数（0~2592000，0 表示解除禁言）。仅群聊可用。"""
         gid = self._llm_group_gate(event)
         if not gid:
             return "该操作仅能在群聊中使用。"
@@ -641,7 +808,7 @@ class GroupMasterPlugin(Star):
         if err:
             return err
         try:
-            ok, msg = await self._do_timeout(event, gid, str(user_id), max(1, min(int(duration_sec), 2592000)))
+            ok, msg = await self._do_timeout(event, gid, str(user_id), max(0, min(int(duration_sec), 2592000)))
         except Exception as e:
             ok, msg = False, f"异常: {e}"
         return ("✅ " if ok else "❌ ") + msg
@@ -750,6 +917,24 @@ class GroupMasterPlugin(Star):
         except Exception as e:
             ok, msg = False, f"异常: {e}"
         return ("✅ " if ok else "❌ ") + msg
+
+    @llm_tool(name="gm_status")
+    async def tool_status(self, event: AstrMessageEvent, user_id: str = ""):
+        """查询当前群的管理状态：无 user_id=全群总览（谁被禁言/禁言剩余、警告计数、拉黑名单与理由）；带 user_id（QQ 号）=该用户在本群的档案。仅群聊可用。"""
+        gid = self._llm_group_gate(event)
+        if not gid:
+            return "该操作仅能在群聊中使用。"
+        err = await self._llm_perm_gate(event)
+        if err:
+            return err
+        target = str(user_id).strip() if user_id else ""
+        if target == str(event.get_self_id()):
+            target = ""  # 查 bot 自己 = 总览
+        try:
+            ok, msg = await self._do_status(event, gid, target)
+        except Exception as e:
+            ok, msg = False, f"异常: {e}"
+        return msg
 
     # ---------------- 拉黑用户入群申请自动拒绝 ----------------
     @filter.event_message_type(filter.EventMessageType.ALL)

@@ -10,12 +10,6 @@
         "type": "int",
         "default": 3
       },
-      "extra_admins": {
-        "description": "额外管理员 QQ 号列表",
-        "hint": "除 AstrBot 管理员与群管理员/群主外，额外允许使用本插件命令的 QQ 号",
-        "type": "list",
-        "default": []
-      },
       "default_mute_seconds": {
         "description": "timeout 默认禁言秒数",
         "hint": "timeout 命令未给数字时的默认时长",
