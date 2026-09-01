@@ -1,5 +1,5 @@
 """
-AstrBot 群管插件 astrbot_plugin_groupmaster v1.0.5
+AstrBot 群管插件 astrbot_plugin_groupmaster v1.0.6
 
 命令（仅群聊可用；仅本群群主/管理员可使用；群内需 @Bot 或唤醒前缀触发；"@"目标也可以直接输 QQ 号）：
   timeout [all] <秒数> <@用户>   禁言指定用户（秒）；all=机器人管理的所有群
@@ -180,7 +180,7 @@ def find_reply_id(event: AstrMessageEvent) -> Optional[str]:
     "astrbot_plugin_groupmaster",
     "Wolfe",
     "QQ群管插件：timeout/kick/ban/warn/recall/mute/admin/status，支持@或QQ号定位、理由记录、跨群 all 批量执行与 LLM 自然语言兜底；仅群聊可用，仅本群群主/管理员可使用。",
-    "1.0.5",
+    "1.0.6",
     "",
 )
 class GroupMasterPlugin(Star):
@@ -584,8 +584,9 @@ class GroupMasterPlugin(Star):
                 shut = {**self.state.get("mute_memo", {}).get(str(gid), {}), **shut}
                 remain = int(shut.get(str(target), 0)) - int(time.time())
                 if remain > 0:
-                    h, m2 = remain // 3600, (remain % 3600) // 60
-                    lines.append(f"🔇 禁言中：剩余 {h}时{m2}分")
+                    h, m2, s = remain // 3600, (remain % 3600) // 60, remain % 60
+                    t = (f"{h}时" if h else "") + (f"{m2}分" if h or m2 else "") + f"{s}秒"
+                    lines.append(f"🔇 禁言中：剩余 {t}")
                     muted = True
             except Exception:
                 pass
@@ -602,8 +603,9 @@ class GroupMasterPlugin(Star):
             for uid, b in shut.items():
                 remain = int(b) - now
                 if remain > 0:
-                    h, m2 = remain // 3600, (remain % 3600) // 60
-                    lines.append(f"🔇 {uid} 禁言剩余 {h}时{m2}分")
+                    h, m2, s = remain // 3600, (remain % 3600) // 60, remain % 60
+                    t = (f"{h}时" if h else "") + (f"{m2}分" if h or m2 else "") + f"{s}秒"
+                    lines.append(f"🔇 {uid} 禁言剩余 {t}")
                     cnt += 1
                     if cnt >= 20:
                         break
