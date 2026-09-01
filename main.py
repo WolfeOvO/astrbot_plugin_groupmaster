@@ -1,5 +1,5 @@
 """
-AstrBot 群管插件 astrbot_plugin_groupmaster v1.0.3
+AstrBot 群管插件 astrbot_plugin_groupmaster v1.0.4
 
 命令（仅群聊可用；仅本群群主/管理员可使用；群内需 @Bot 或唤醒前缀触发；"@"目标也可以直接输 QQ 号）：
   timeout [all] <秒数> <@用户>   禁言指定用户（秒）；all=机器人管理的所有群
@@ -180,7 +180,7 @@ def find_reply_id(event: AstrMessageEvent) -> Optional[str]:
     "astrbot_plugin_groupmaster",
     "Wolfe",
     "QQ群管插件：timeout/kick/ban/warn/recall/mute/admin/status，支持@或QQ号定位、理由记录、跨群 all 批量执行与 LLM 自然语言兜底；仅群聊可用，仅本群群主/管理员可使用。",
-    "1.0.3",
+    "1.0.4",
     "",
 )
 class GroupMasterPlugin(Star):
@@ -492,6 +492,49 @@ class GroupMasterPlugin(Star):
         except Exception:
             return "?"
 
+    def _shut_map(self, res) -> dict:
+        """归一化 get_group_shut_list 返回 → {uid: 到期时间戳}。
+
+        NapCat 返回数组 [{user_id, nickname, shut_up_time}, ...]（shut_up_time 实测为禁言截止
+        时间戳；若整表均早于当前时间，则按禁言起点处理，补 default_mute_seconds 推算到期）；
+        其他实现可能返回字典 {uid: 到期时间戳} 或 {uid: {"b": ...}}。无法识别时返回空 dict。
+        """
+        data = res.get("data") if isinstance(res, dict) else res
+        out: dict = {}
+        now = int(time.time())
+        if isinstance(data, list):
+            raw = {}
+            for it in data:
+                if not isinstance(it, dict):
+                    continue
+                uid = str(it.get("user_id") or it.get("u") or it.get("uid") or "")
+                ts = it.get("shut_up_time", it.get("b", it.get("end_time", 0)))
+                try:
+                    ts = int(ts)
+                except (TypeError, ValueError):
+                    continue
+                if uid and uid.isdigit() and ts > 0:
+                    raw[uid] = ts
+            if raw and max(raw.values()) > now:
+                # 存在晚于当前时间的条目 → 字段是截止时间，只保留仍在禁言中的
+                out = {uid: ts for uid, ts in raw.items() if ts > now}
+            else:
+                # 全部早于当前时间 → 字段是禁言起点，补默认时长推算到期
+                try:
+                    dur = int(self.state.get("default_mute_seconds", 600) or 600)
+                except Exception:
+                    dur = 600
+                out = {uid: ts + dur for uid, ts in raw.items() if ts + dur > now}
+        elif isinstance(data, dict):
+            for uid, info in data.items():
+                try:
+                    ts = int(info.get("b") if isinstance(info, dict) else info)
+                except (TypeError, ValueError):
+                    continue
+                if ts > now:
+                    out[str(uid)] = ts
+        return out
+
     async def _do_status(self, event, gid, target: str = "") -> Tuple[bool, str]:
         """本群状态查询：谁被禁言/禁言剩余时间、警告计数、拉黑名单与理由。仅同群群主/管理员可用。"""
         lines = []
@@ -522,16 +565,12 @@ class GroupMasterPlugin(Star):
                 lines.append(f"🚫 已拉黑（{self._fmt_ts(b)}{'｜' + br if br else ''}），其入群申请会被自动拒绝")
             muted = False
             try:
-                res = await self._ob(event, "get_group_shut_list", group_id=int(gid))
-                data = res.get("data") if isinstance(res, dict) and isinstance(res.get("data"), dict) else res
-                if isinstance(data, dict) and str(target) in data:
-                    info = data[str(target)]
-                    b = int(info.get("b", 0)) if isinstance(info, dict) else int(info)
-                    remain = b - int(time.time())
-                    if remain > 0:
-                        h, m2 = remain // 3600, (remain % 3600) // 60
-                        lines.append(f"🔇 禁言中：剩余 {h}时{m2}分")
-                        muted = True
+                shut = self._shut_map(await self._ob(event, "get_group_shut_list", group_id=int(gid)))
+                remain = int(shut.get(str(target), 0)) - int(time.time())
+                if remain > 0:
+                    h, m2 = remain // 3600, (remain % 3600) // 60
+                    lines.append(f"🔇 禁言中：剩余 {h}时{m2}分")
+                    muted = True
             except Exception:
                 pass
             if not muted and role:
@@ -540,27 +579,19 @@ class GroupMasterPlugin(Star):
         # 全群总览
         # 1) 禁言列表（get_group_shut_list：NapCat 扩展，失败则提示不可查）
         try:
-            res = await self._ob(event, "get_group_shut_list", group_id=int(gid))
-            data = res.get("data") if isinstance(res, dict) and isinstance(res.get("data"), dict) else res
-            if isinstance(data, dict):
-                now = int(time.time())
-                cnt = 0
-                for uid, info in data.items():
-                    try:
-                        b = int(info.get("b", 0)) if isinstance(info, dict) else int(info)
-                        remain = b - now
-                        if remain > 0:
-                            h, m2 = remain // 3600, (remain % 3600) // 60
-                            lines.append(f"🔇 {uid} 禁言剩余 {h}时{m2}分")
-                            cnt += 1
-                            if cnt >= 20:
-                                break
-                    except Exception:
-                        continue
-                if cnt == 0:
-                    lines.append("🔇 当前无人处于禁言中")
-            else:
-                lines.append("🔇 禁言列表：适配器未返回数据（NapCat 需较新版本）")
+            shut = self._shut_map(await self._ob(event, "get_group_shut_list", group_id=int(gid)))
+            now = int(time.time())
+            cnt = 0
+            for uid, b in shut.items():
+                remain = int(b) - now
+                if remain > 0:
+                    h, m2 = remain // 3600, (remain % 3600) // 60
+                    lines.append(f"🔇 {uid} 禁言剩余 {h}时{m2}分")
+                    cnt += 1
+                    if cnt >= 20:
+                        break
+            if cnt == 0:
+                lines.append("🔇 当前无人处于禁言中")
         except Exception as e:
             lines.append(f"🔇 禁言列表不可查（{str(e)[:60]}）")
         # 2) 警告计数
