@@ -1,5 +1,5 @@
 """
-AstrBot 群管插件 astrbot_plugin_groupmaster v1.0.4
+AstrBot 群管插件 astrbot_plugin_groupmaster v1.0.5
 
 命令（仅群聊可用；仅本群群主/管理员可使用；群内需 @Bot 或唤醒前缀触发；"@"目标也可以直接输 QQ 号）：
   timeout [all] <秒数> <@用户>   禁言指定用户（秒）；all=机器人管理的所有群
@@ -180,7 +180,7 @@ def find_reply_id(event: AstrMessageEvent) -> Optional[str]:
     "astrbot_plugin_groupmaster",
     "Wolfe",
     "QQ群管插件：timeout/kick/ban/warn/recall/mute/admin/status，支持@或QQ号定位、理由记录、跨群 all 批量执行与 LLM 自然语言兜底；仅群聊可用，仅本群群主/管理员可使用。",
-    "1.0.4",
+    "1.0.5",
     "",
 )
 class GroupMasterPlugin(Star):
@@ -374,11 +374,26 @@ class GroupMasterPlugin(Star):
             return False, msg
         try:
             await self._ob(event, "set_group_ban", group_id=int(gid), user_id=int(target), duration=dur)
-            if dur <= 0:
-                return True, f"已解除 {target} 的禁言"
-            return True, f"已禁言 {target} {dur} 秒"
         except Exception as e:
             return False, f"禁言失败: {e}"
+        # 本地禁言记账：记录到期时间戳，供 status 兜底（NapCat get_group_shut_list
+        # 基于 1 秒内核事件监听，可能漏报正在禁言中的成员）
+        try:
+            memo = self.state.setdefault("mute_memo", {}).setdefault(str(gid), {})
+            if dur > 0:
+                memo[str(target)] = int(time.time()) + int(dur)
+            else:
+                memo.pop(str(target), None)
+            # 顺手清理已过期条目
+            now = int(time.time())
+            for uid in [u for u, exp in memo.items() if int(exp) <= now]:
+                memo.pop(uid, None)
+            self._save_state()
+        except Exception:
+            pass
+        if dur <= 0:
+            return True, f"已解除 {target} 的禁言"
+        return True, f"已禁言 {target} {dur} 秒"
 
     async def _do_kick(self, event, gid, target: str, blacklist: bool, reason: str = "") -> Tuple[bool, str]:
         if target == str(event.get_self_id()):
@@ -566,6 +581,7 @@ class GroupMasterPlugin(Star):
             muted = False
             try:
                 shut = self._shut_map(await self._ob(event, "get_group_shut_list", group_id=int(gid)))
+                shut = {**self.state.get("mute_memo", {}).get(str(gid), {}), **shut}
                 remain = int(shut.get(str(target), 0)) - int(time.time())
                 if remain > 0:
                     h, m2 = remain // 3600, (remain % 3600) // 60
@@ -580,6 +596,7 @@ class GroupMasterPlugin(Star):
         # 1) 禁言列表（get_group_shut_list：NapCat 扩展，失败则提示不可查）
         try:
             shut = self._shut_map(await self._ob(event, "get_group_shut_list", group_id=int(gid)))
+            shut = {**self.state.get("mute_memo", {}).get(str(gid), {}), **shut}
             now = int(time.time())
             cnt = 0
             for uid, b in shut.items():

@@ -152,7 +152,7 @@ git clone https://github.com/WolfeOvO/astrbot_plugin_groupmaster
 AstrBot/data/plugin_data/astrbot_plugin_groupmaster/state.json
 ```
 
-- 结构：`warn_max`（全局上限）、`warns.{群号}.{QQ号}`（计数）、`bans.{群号}.{QQ号}`（拉黑时间戳）、`reasons.{群号}.{key}`（理由：`ban:{QQ号}` 单条，`warn:{QQ号}` 最近 3 条）
+- 结构：`warn_max`（全局上限）、`warns.{群号}.{QQ号}`（计数）、`bans.{群号}.{QQ号}`（拉黑时间戳）、`reasons.{群号}.{key}`（理由：`ban:{QQ号}` 单条，`warn:{QQ号}` 最近 3 条）、`mute_memo.{群号}.{QQ号}`（本插件执行的禁言到期时间戳，供 status 兜底显示）
 - `warn max` 的值优先于配置文件 `warn_max`
 - 备份此文件即备份全部插件状态
 
