@@ -9,7 +9,7 @@
 ## ✨ 特性
 
 - 🎯 **双目标定位**：`@昵称` 或直接输 QQ 号均可
-- 📝 **理由存档**：`ban` / `warn` 可附理由，随操作持久化，`status` 里随时回查
+- 📝 **理由存档**：`timeout` / `kick` / `ban` / `warn` 可附理由，随操作持久化，`status` 里随时回查
 - 📊 **状态查询**：`status` 一键查看本群禁言剩余时间、警告计数、拉黑名单与理由；带目标查单人档案
 - 🌐 **跨群批量**：任意操作命令追加 `all`，作用于机器人担任管理员/群主的**所有群**，逐群回报结果
 - 💬 **引用撤回**：引用一条消息发 `recall` 即撤回；也可按用户撤回最近 N 条
@@ -52,6 +52,8 @@ git clone https://github.com/WolfeOvO/astrbot_plugin_groupmaster
 | `timeout 0 <@用户>` | **解除**该用户的禁言 |
 | `kick <@用户>` | 将该用户移出群聊 |
 | `ban <@用户> [理由]` | 移出群聊**并拉黑**，自动拒绝其后续入群申请；理由存档 |
+| `kick <@用户> [理由]` | 移出群聊（不拉黑），可附理由存档 |
+| `timeout <秒数> <@用户> [理由]` | 禁言指定秒数，可附理由（`status` 展示）；`timeout 0` = 解除 |
 | `unban <@用户>` | 解除拉黑，允许重新申请入群 |
 | `warn <@用户> [理由]` | 警告次数 +1，达到上限自动移出群聊；理由存档（保留最近 3 条） |
 | `warn max <次数>` | 设定警告次数上限（全局，即时生效并持久化） |
@@ -104,8 +106,8 @@ git clone https://github.com/WolfeOvO/astrbot_plugin_groupmaster
 
 | 工具 | 对应操作 |
 | --- | --- |
-| `gm_timeout_user` | 禁言（`duration=0` 解除禁言） |
-| `gm_kick_user` | 踢出 |
+| `gm_timeout_user` | 禁言（可附理由，`duration=0` 解除禁言） |
+| `gm_kick_user` | 踢出（可附理由） |
 | `gm_ban_user` | 拉黑踢出（可附理由） |
 | `gm_unban_user` | 解除拉黑 |
 | `gm_warn_user` | 警告（可附理由） |
@@ -152,7 +154,7 @@ git clone https://github.com/WolfeOvO/astrbot_plugin_groupmaster
 AstrBot/data/plugin_data/astrbot_plugin_groupmaster/state.json
 ```
 
-- 结构：`warn_max`（全局上限）、`warns.{群号}.{QQ号}`（计数）、`bans.{群号}.{QQ号}`（拉黑时间戳）、`reasons.{群号}.{key}`（理由：`ban:{QQ号}` 单条，`warn:{QQ号}` 最近 3 条）、`mute_memo.{群号}.{QQ号}`（本插件执行的禁言到期时间戳，供 status 兜底显示）
+- 结构：`warn_max`（全局上限）、`warns.{群号}.{QQ号}`（计数）、`bans.{群号}.{QQ号}`（拉黑时间戳）、`reasons.{群号}.{key}`（理由：`ban:{QQ号}` 单条，`warn:{QQ号}` 最近 3 条，`timeout:{QQ号}` 含 `exp` 到期时间戳，`kick:{QQ号}` 普通踢出）、`mute_memo.{群号}.{QQ号}`（本插件执行的禁言到期时间戳，供 status 兜底显示）
 - `warn max` 的值优先于配置文件 `warn_max`
 - 备份此文件即备份全部插件状态
 

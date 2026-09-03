@@ -1,5 +1,5 @@
 """
-AstrBot 群管插件 astrbot_plugin_groupmaster v1.0.6
+AstrBot 群管插件 astrbot_plugin_groupmaster v1.0.7
 
 命令（仅群聊可用；仅本群群主/管理员可使用；群内需 @Bot 或唤醒前缀触发；"@"目标也可以直接输 QQ 号）：
   timeout [all] <秒数> <@用户>   禁言指定用户（秒）；all=机器人管理的所有群
@@ -180,7 +180,7 @@ def find_reply_id(event: AstrMessageEvent) -> Optional[str]:
     "astrbot_plugin_groupmaster",
     "Wolfe",
     "QQ群管插件：timeout/kick/ban/warn/recall/mute/admin/status，支持@或QQ号定位、理由记录、跨群 all 批量执行与 LLM 自然语言兜底；仅群聊可用，仅本群群主/管理员可使用。",
-    "1.0.6",
+    "1.0.7",
     "",
 )
 class GroupMasterPlugin(Star):
@@ -366,7 +366,7 @@ class GroupMasterPlugin(Star):
         return found
 
     # ---------------- 单群执行（供命令与全局批量化复用） ----------------
-    async def _do_timeout(self, event, gid, target: str, dur: int) -> Tuple[bool, str]:
+    async def _do_timeout(self, event, gid, target: str, dur: int, reason: str = "") -> Tuple[bool, str]:
         if target == str(event.get_self_id()):
             return False, "不能对机器人自己执行该操作"
         ok, msg = await self._bot_gate(event, gid)
@@ -388,12 +388,20 @@ class GroupMasterPlugin(Star):
             now = int(time.time())
             for uid in [u for u, exp in memo.items() if int(exp) <= now]:
                 memo.pop(uid, None)
+            # 禁言理由：写入 reasons，schema 与 ban/warn 对齐
+            rk = f"timeout:{target}"
+            rs = self.state.setdefault("reasons", {}).setdefault(str(gid), {})
+            if dur > 0:
+                rs[rk] = {"t": int(time.time()), "r": str(reason or "")[:100], "exp": int(time.time()) + int(dur)}
+            else:
+                # 解除禁言时清掉对应理由
+                rs.pop(rk, None)
             self._save_state()
         except Exception:
             pass
         if dur <= 0:
             return True, f"已解除 {target} 的禁言"
-        return True, f"已禁言 {target} {dur} 秒"
+        return True, f"已禁言 {target} {dur} 秒" + (f"｜理由：{reason}" if reason else "")
 
     async def _do_kick(self, event, gid, target: str, blacklist: bool, reason: str = "") -> Tuple[bool, str]:
         if target == str(event.get_self_id()):
@@ -414,7 +422,13 @@ class GroupMasterPlugin(Star):
                     pass
                 self._save_state()
                 return True, f"已将 {target} 移出群聊并拉黑（后续入群申请将被自动拒绝）" + (f"｜理由：{reason}" if reason else "")
-            return True, f"已将 {target} 移出群聊"
+            # 普通踢出（不拉黑）：reason 写入 reasons[kick:uid]，不写 bans
+            try:
+                self.state.setdefault("reasons", {}).setdefault(str(gid), {})[f"kick:{target}"] = {"t": int(time.time()), "r": str(reason or "")[:100]}
+                self._save_state()
+            except Exception:
+                pass
+            return True, f"已将 {target} 移出群聊" + (f"｜理由：{reason}" if reason else "")
         except Exception as e:
             return False, f"踢出失败: {e}"
 
@@ -586,7 +600,8 @@ class GroupMasterPlugin(Star):
                 if remain > 0:
                     h, m2, s = remain // 3600, (remain % 3600) // 60, remain % 60
                     t = (f"{h}时" if h else "") + (f"{m2}分" if h or m2 else "") + f"{s}秒"
-                    lines.append(f"🔇 禁言中：剩余 {t}")
+                    tr = self.state.get("reasons", {}).get(str(gid), {}).get(f"timeout:{target}", {}).get("r", "")
+                    lines.append(f"🔇 禁言中：剩余 {t}" + (f"｜理由：{tr}" if tr else ""))
                     muted = True
             except Exception:
                 pass
@@ -605,7 +620,8 @@ class GroupMasterPlugin(Star):
                 if remain > 0:
                     h, m2, s = remain // 3600, (remain % 3600) // 60, remain % 60
                     t = (f"{h}时" if h else "") + (f"{m2}分" if h or m2 else "") + f"{s}秒"
-                    lines.append(f"🔇 {uid} 禁言剩余 {t}")
+                    tr = self.state.get("reasons", {}).get(str(gid), {}).get(f"timeout:{uid}", {}).get("r", "")
+                    lines.append(f"🔇 {uid} 禁言剩余 {t}" + (f"｜理由：{tr}" if tr else ""))
                     cnt += 1
                     if cnt >= 20:
                         break
@@ -641,6 +657,14 @@ class GroupMasterPlugin(Star):
                 last = v[-1]
                 parts.append(f"{uid}（{self._fmt_ts(last.get('t'))}｜{last.get('r', '')}）")
             lines.append("📝 最近警告理由：" + "、".join(parts))
+        # 5) 最近踢出理由（普通踢出 + 拉黑踢出合并展示，ban:* 优先）
+        krecs = [(k, v) for k, v in reasons.items() if k.startswith("kick:") and v and v.get("r")]
+        if krecs:
+            parts = []
+            for k, v in krecs[:20]:
+                uid = k[5:]
+                parts.append(f"{uid}（{self._fmt_ts(v.get('t'))}｜{v.get('r', '')}）")
+            lines.append("🥾 最近踢出理由：" + "、".join(parts))
         return True, "\n".join(lines)
 
     async def _do_admin(self, event, gid, toks: list) -> Tuple[bool, str]:
@@ -680,15 +704,17 @@ class GroupMasterPlugin(Star):
             if not target:
                 if chain_has_at_self(event):
                     return False, "不能对机器人自己禁言。若要禁言他人：timeout <秒数> <@用户/QQ号>"
-                return False, "用法：timeout <秒数> <@用户/QQ号>；timeout 0 <@用户> = 解除其禁言"
-            return await self._do_timeout(event, gid, target, dur)
+                return False, "用法：timeout <秒数> <@用户/QQ号> [理由]；timeout 0 <@用户> = 解除其禁言"
+            reason = extract_reason(toks, target)
+            return await self._do_timeout(event, gid, target, dur, reason=reason)
         if op == "kick":
             target = extract_target_qq(event, toks)
             if not target:
                 if chain_has_at_self(event):
                     return False, "不能对机器人自己执行踢出。若要踢他人：kick <@用户/QQ号>"
-                return False, "用法：kick <@用户/QQ号>"
-            return await self._do_kick(event, gid, target, blacklist=False)
+                return False, "用法：kick <@用户/QQ号> [理由]"
+            reason = extract_reason(toks, target)
+            return await self._do_kick(event, gid, target, blacklist=False, reason=reason)
         if op == "ban":
             target = extract_target_qq(event, toks, numeric_param_first=False)
             if not target:
@@ -849,8 +875,8 @@ class GroupMasterPlugin(Star):
         return None
 
     @llm_tool(name="gm_timeout_user")
-    async def tool_timeout(self, event: AstrMessageEvent, user_id: str, duration_sec: int = 600):
-        """禁言当前群内指定用户。user_id 为目标 QQ 号（从消息中的 @昵称(QQ号) 或用户提供的号码解析），duration_sec 为禁言秒数（0~2592000，0 表示解除禁言）。仅群聊可用。"""
+    async def tool_timeout(self, event: AstrMessageEvent, user_id: str, duration_sec: int = 600, reason: str = ""):
+        """禁言当前群内指定用户。user_id 为目标 QQ 号，duration_sec 为禁言秒数（0~2592000，0 表示解除禁言），reason 为可选理由（记入 status 展示）。仅群聊可用。"""
         gid = self._llm_group_gate(event)
         if not gid:
             return "该操作仅能在群聊中使用。"
@@ -858,14 +884,14 @@ class GroupMasterPlugin(Star):
         if err:
             return err
         try:
-            ok, msg = await self._do_timeout(event, gid, str(user_id), max(0, min(int(duration_sec), 2592000)))
+            ok, msg = await self._do_timeout(event, gid, str(user_id), max(0, min(int(duration_sec), 2592000)), reason=str(reason or "")[:100])
         except Exception as e:
             ok, msg = False, f"异常: {e}"
         return ("✅ " if ok else "❌ ") + msg
 
     @llm_tool(name="gm_kick_user")
-    async def tool_kick(self, event: AstrMessageEvent, user_id: str):
-        """将当前群内指定用户移出群聊（不拉黑）。user_id 为目标 QQ 号。仅群聊可用。"""
+    async def tool_kick(self, event: AstrMessageEvent, user_id: str, reason: str = ""):
+        """将当前群内指定用户移出群聊（不拉黑）。user_id 为目标 QQ 号，reason 为可选理由（记入状态档案，status 可查）。仅群聊可用。"""
         gid = self._llm_group_gate(event)
         if not gid:
             return "该操作仅能在群聊中使用。"
@@ -873,7 +899,7 @@ class GroupMasterPlugin(Star):
         if err:
             return err
         try:
-            ok, msg = await self._do_kick(event, gid, str(user_id), blacklist=False)
+            ok, msg = await self._do_kick(event, gid, str(user_id), blacklist=False, reason=str(reason or "")[:100])
         except Exception as e:
             ok, msg = False, f"异常: {e}"
         return ("✅ " if ok else "❌ ") + msg
