@@ -1,5 +1,5 @@
 """
-AstrBot 群管插件 astrbot_plugin_groupmaster v1.0.7
+AstrBot 群管插件 astrbot_plugin_groupmaster v1.1.0
 
 命令（仅群聊可用；仅本群群主/管理员可使用；群内需 @Bot 或唤醒前缀触发；"@"目标也可以直接输 QQ 号）：
   timeout [all] <秒数> <@用户>   禁言指定用户（秒）；all=机器人管理的所有群
@@ -16,11 +16,13 @@ AstrBot 群管插件 astrbot_plugin_groupmaster v1.0.7
   admin set/remove <@用户>       设置/取消群管理员（需机器人为群主）
   status [/@用户/QQ号]           查询本群禁言剩余/警告计数/拉黑名单与理由；带目标=查该用户档案
   @Bot + 自然语言                未命中命令时走 LLM，调用本插件注册的 llm_tool 完成同套操作
+                                  工具集 20 个（11 管理类 + 9 信息/互动类），详见 README
+                                  LLM 输出 [at:QQ] / [at:all] 标签由本插件转原生 At 组件
 
 OneBot(NapCat) 动作：set_group_ban / set_group_kick / delete_msg /
 set_group_whole_ban / set_group_admin / set_group_add_request /
 get_group_member_info / get_group_list / get_group_msg_history / get_group_setting /
-get_group_shut_list
+get_group_shut_list / set_essence / set_group_card / send_group_notice
 """
 
 import json
@@ -28,28 +30,77 @@ import logging
 import os
 import re
 import time
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.event.filter import llm_tool
-from astrbot.api.message_components import At, Plain
+from astrbot.api.message_components import At, BaseMessageComponent, Plain
+from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, register
 from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 
 logger = logging.getLogger("astrbot")
 LOG = "[groupmaster]"
 
-COMMAND_NAMES = {"timeout", "kick", "ban", "unban", "warn", "recall", "mute", "admin", "status"}
+# LLM 自然语言兜底：在 LLM 输出文本中插入 [at:QQ号] / [at:all] 标签
+AT_PATTERN = re.compile(r"\[at:(?P<uid>\d+|all)\]")
+AT_INSTRUCTION = (
+    "\n\n【艾特成员提示】"
+    "\n当你想在回复中 @ 某个群成员时，请在文本中插入格式 [at:用户ID] 的标签（ID 必须是纯数字 QQ 号）。"
+    "\n要 @ 全体成员，插入 [at:all]。"
+    "\n例：你好[at:123456789]，已处理你的问题。"
+    "\n如需先查 QQ 号，可调用 gm_get_member_list 工具。"
+)
+
+# 超长禁言分段参数（QQ 单次最多 30 天 = 2592000 秒）
+MUTE_CHUNK = 2592000  # 30天
+RENEW_LEAD = 300      # 提前 5 分钟续期
+MAX_MUTE_DAYS = 365   # 超长禁言上限（天）
+
+# 敏感词 / 刷屏 / 广告 默认阈值
+DEFAULT_SW_DURATION = 600
+DEFAULT_FLOOD_THRESHOLD = 5
+DEFAULT_FLOOD_WINDOW = 10
+DEFAULT_FLOOD_REPEAT = 3
+DEFAULT_AD_THRESHOLD = 10
+
+# LLM 自然语言兜底：在 LLM 输出文本中插入 [at:QQ号] / [at:all] 标签，
+# 由 on_decorating_result 阶段解析为原生 At 组件。
+AT_PATTERN = re.compile(r"\[at:(?P<uid>\d+|all)\]")
+AT_INSTRUCTION = (
+    "\n\n【艾特成员提示】"
+    "\n当你想在回复中 @ 某个群成员时，请在文本中插入格式 [at:用户ID] 的标签（ID 必须是纯数字 QQ 号）。"
+    "\n要 @ 全体成员，插入 [at:all]。"
+    "\n例：你好[at:123456789]，已处理你的问题。"
+    "\n例：@全体成员[at:all] 注意 5 分钟后开始。"
+    "\n如需先查 QQ 号，可调用 gm_get_member_list 工具。"
+)
+
+COMMAND_NAMES = {"timeout", "kick", "ban", "unban", "warn", "recall", "mute", "muteall", "unmute", "mutelist", "admin", "status", "banlist", "title", "sw", "antiflood", "cardcheck", "ad", "adban", "wel", "bye", "bc", "g"}
 OP_NAMES = {
     "timeout": "禁言",
+    "unmute": "解禁",
+    "mutelist": "禁言列表",
+    "muteall": "全员禁言(定时)",
     "kick": "踢出",
     "ban": "拉黑踢出",
     "unban": "解除拉黑",
+    "banlist": "拉黑列表",
     "warn": "警告",
     "recall": "撤回",
-    "mute": "全员禁言",
+    "mute": "全员禁言开关",
     "admin": "管理员设置",
     "status": "状态查询",
+    "title": "头衔",
+    "sw": "敏感词",
+    "antiflood": "刷屏检测",
+    "cardcheck": "名片检测",
+    "ad": "广告检测",
+    "adban": "广告拦截",
+    "wel": "欢迎消息",
+    "bye": "退群提示",
+    "bc": "群公告",
+    "g": "群操作",
 }
 # @昵称(QQ号) / @(QQ号)（空昵称）/ @任意字符(QQ号)
 AT_RE = re.compile(r"@\S*?\((\d{5,12})\)")
@@ -180,7 +231,7 @@ def find_reply_id(event: AstrMessageEvent) -> Optional[str]:
     "astrbot_plugin_groupmaster",
     "Wolfe",
     "QQ群管插件：timeout/kick/ban/warn/recall/mute/admin/status，支持@或QQ号定位、理由记录、跨群 all 批量执行与 LLM 自然语言兜底；仅群聊可用，仅本群群主/管理员可使用。",
-    "1.0.7",
+    "1.1.0",
     "",
 )
 class GroupMasterPlugin(Star):
@@ -192,6 +243,8 @@ class GroupMasterPlugin(Star):
             os.makedirs(self.data_dir, exist_ok=True)
         except Exception as e:
             logger.error(f"{LOG} 创建数据目录失败: {e}")
+        self._tasks = set()  # 后台任务集合
+
         self.state_path = os.path.join(self.data_dir, "state.json")
         self.state = self._load_state()
         self._whole_mute_mem = {}
@@ -686,6 +739,291 @@ class GroupMasterPlugin(Star):
         except Exception as e:
             return False, f"设置管理员失败: {e}"
 
+
+    async def _do_unmute(self, event, gid, target: str) -> Tuple[bool, str]:
+        """解除禁言（等价于 timeout 0）"""
+        if target == str(event.get_self_id()):
+            return False, "不能对机器人自己解禁"
+        try:
+            ob = self._ob(event)
+            await ob.call("set_group_ban", group_id=int(gid), user_id=int(target), duration=0)
+            # 清理超长禁言记录
+            memo = self.state.get("mute_memo", {}).get(str(gid), {})
+            if str(target) in memo:
+                del memo[str(target)]
+                self._save_state()
+            return True, f"已解除 {target} 的禁言"
+        except Exception as e:
+            return False, f"解除禁言失败: {e}"
+
+    async def _do_muteall(self, event, gid, dur: int) -> Tuple[bool, str]:
+        """全员禁言指定时长（秒），0=关闭"""
+        try:
+            ob = self._ob(event)
+            if dur == 0:
+                await ob.call("set_group_whole_ban", group_id=int(gid), enable=False)
+                return True, "已关闭全员禁言"
+            else:
+                await ob.call("set_group_whole_ban", group_id=int(gid), enable=True)
+                # 注意：QQ 的全员禁言没有自动到期，需手动关闭或用定时任务
+                return True, f"已开启全员禁言（需手动关闭或设定时任务 {dur}秒后关闭）"
+        except Exception as e:
+            return False, f"全员禁言操作失败: {e}"
+
+    async def _do_mutelist(self, event, gid) -> Tuple[bool, str]:
+        """列出当前群所有被禁言的成员"""
+        try:
+            ob = self._ob(event)
+            members = await ob.call("get_group_member_list", group_id=int(gid))
+            if not members:
+                return False, "获取成员列表失败"
+            
+            import time
+            now = int(time.time())
+            muted = []
+            for m in members:
+                shut = m.get("shut_up_timestamp", 0)
+                if shut and shut > now:
+                    remaining = shut - now
+                    name = m.get("card") or m.get("nickname") or str(m.get("user_id"))
+                    muted.append(f"{name}({m['user_id']}) 剩余{remaining//60}分{remaining%60}秒")
+            
+            if not muted:
+                return True, "当前群没有被禁言的成员"
+            return True, f"禁言列表({len(muted)}):\n" + "\n".join(muted[:20])
+        except Exception as e:
+            return False, f"查询禁言列表失败: {e}"
+
+    async def _do_banlist(self, event, gid) -> Tuple[bool, str]:
+        """列出当前群拉黑名单"""
+        bans = self.state.get("bans", {}).get(str(gid), {})
+        if not bans:
+            return True, "当前群拉黑名单为空"
+        lines = []
+        for uid, rec in list(bans.items())[:20]:
+            reason = rec.get("reason", "")
+            ts = rec.get("timestamp", 0)
+            import time
+            date = time.strftime("%Y-%m-%d", time.localtime(ts)) if ts else ""
+            lines.append(f"{uid} {date} {reason}"[:80])
+        return True, f"拉黑名单({len(bans)}):\n" + "\n".join(lines)
+
+    async def _do_title(self, event, gid, toks: list) -> Tuple[bool, str]:
+        """设置群成员头衔：title <@用户> <头衔文本>"""
+        target = extract_target_qq(event, toks)
+        if not target:
+            return False, "用法：title <@用户> <头衔文本>"
+        title_text = " ".join([t for t in toks if not AT_RE.search(t) and not t.isdigit()])
+        if not title_text:
+            return False, "请提供头衔文本"
+        try:
+            ob = self._ob(event)
+            await ob.call("set_group_special_title", group_id=int(gid), user_id=int(target), special_title=title_text, duration=-1)
+            return True, f"已设置 {target} 的头衔为 {title_text}"
+        except Exception as e:
+            return False, f"设置头衔失败: {e}"
+
+    async def _do_sw(self, event, gid, toks: list) -> Tuple[bool, str]:
+        """敏感词管理：sw add/del/list/on/off/set"""
+        if not toks:
+            return False, "用法：sw add <词> | sw del <词> | sw list | sw on/off | sw set <秒数>"
+        sub = toks[0].lower()
+        sw_conf = self.state.setdefault("sw", {}).setdefault(str(gid), {"enabled": False, "words": [], "duration": DEFAULT_SW_DURATION})
+        
+        if sub == "on":
+            sw_conf["enabled"] = True
+            self._save_state()
+            return True, "已开启敏感词检测"
+        elif sub == "off":
+            sw_conf["enabled"] = False
+            self._save_state()
+            return True, "已关闭敏感词检测"
+        elif sub == "add":
+            word = " ".join(toks[1:]).strip()
+            if not word:
+                return False, "用法：sw add <敏感词>"
+            if word not in sw_conf["words"]:
+                sw_conf["words"].append(word)
+                self._save_state()
+            return True, f"已添加敏感词：{word}"
+        elif sub == "del":
+            word = " ".join(toks[1:]).strip()
+            if word in sw_conf["words"]:
+                sw_conf["words"].remove(word)
+                self._save_state()
+                return True, f"已删除敏感词：{word}"
+            return False, f"敏感词不存在：{word}"
+        elif sub == "list":
+            words = sw_conf.get("words", [])
+            status = "开启" if sw_conf.get("enabled") else "关闭"
+            dur = sw_conf.get("duration", DEFAULT_SW_DURATION)
+            if not words:
+                return True, f"敏感词检测状态：{status}，词库为空，禁言时长{dur}秒"
+            return True, f"敏感词检测({status})，禁言{dur}秒，词库({len(words)})：\n" + "\n".join(words[:30])
+        elif sub == "set":
+            dur = first_int(toks[1:])
+            if dur is None or dur < 0:
+                return False, "用法：sw set <秒数>"
+            sw_conf["duration"] = min(dur, 2592000)
+            self._save_state()
+            return True, f"已设置敏感词禁言时长为 {dur} 秒"
+        return False, "未知子命令"
+
+    async def _do_antiflood(self, event, gid, toks: list) -> Tuple[bool, str]:
+        """刷屏检测：antiflood on/off/set"""
+        if not toks:
+            return False, "用法：antiflood on/off | antiflood set <阈值> <窗口秒>"
+        sub = toks[0].lower()
+        flood_conf = self.state.setdefault("flood", {}).setdefault(str(gid), {"enabled": False, "threshold": DEFAULT_FLOOD_THRESHOLD, "window": DEFAULT_FLOOD_WINDOW})
+        
+        if sub == "on":
+            flood_conf["enabled"] = True
+            self._save_state()
+            return True, "已开启刷屏检测"
+        elif sub == "off":
+            flood_conf["enabled"] = False
+            self._save_state()
+            return True, "已关闭刷屏检测"
+        elif sub == "set":
+            nums = [int(t) for t in toks[1:] if t.isdigit()]
+            if len(nums) < 2:
+                return False, "用法：antiflood set <阈值> <窗口秒>"
+            flood_conf["threshold"] = nums[0]
+            flood_conf["window"] = nums[1]
+            self._save_state()
+            return True, f"已设置刷屏阈值：{nums[1]}秒内{nums[0]}条消息"
+        return False, "未知子命令"
+
+    async def _do_cardcheck(self, event, gid, toks: list) -> Tuple[bool, str]:
+        """名片检测：cardcheck on/off"""
+        if not toks:
+            return False, "用法：cardcheck on/off"
+        sub = toks[0].lower()
+        card_conf = self.state.setdefault("cardcheck", {}).setdefault(str(gid), {"enabled": False})
+        
+        if sub == "on":
+            card_conf["enabled"] = True
+            self._save_state()
+            return True, "已开启名片检测（入群时检查）"
+        elif sub == "off":
+            card_conf["enabled"] = False
+            self._save_state()
+            return True, "已关闭名片检测"
+        return False, "未知子命令"
+
+    async def _do_ad(self, event, gid, toks: list) -> Tuple[bool, str]:
+        """广告检测配置：ad on/off/set"""
+        if not toks:
+            return False, "用法：ad on/off | ad set <阈值>"
+        sub = toks[0].lower()
+        ad_conf = self.state.setdefault("ad", {}).setdefault(str(gid), {"enabled": False, "threshold": DEFAULT_AD_THRESHOLD})
+        
+        if sub == "on":
+            ad_conf["enabled"] = True
+            self._save_state()
+            return True, "已开启广告检测"
+        elif sub == "off":
+            ad_conf["enabled"] = False
+            self._save_state()
+            return True, "已关闭广告检测"
+        elif sub == "set":
+            thr = first_int(toks[1:])
+            if thr is None:
+                return False, "用法：ad set <阈值>"
+            ad_conf["threshold"] = thr
+            self._save_state()
+            return True, f"已设置广告评分阈值为 {thr}"
+        return False, "未知子命令"
+
+    async def _do_adban(self, event, gid, toks: list) -> Tuple[bool, str]:
+        """广告拦截行为：adban mute/kick/ban"""
+        if not toks:
+            return False, "用法：adban mute/kick/ban"
+        action = toks[0].lower()
+        if action not in ("mute", "kick", "ban"):
+            return False, "未知动作，可选：mute/kick/ban"
+        ad_conf = self.state.setdefault("ad", {}).setdefault(str(gid), {})
+        ad_conf["action"] = action
+        self._save_state()
+        return True, f"已设置广告拦截动作为 {action}"
+
+    async def _do_wel(self, event, gid, toks: list) -> Tuple[bool, str]:
+        """欢迎消息：wel on/off/set <消息>"""
+        if not toks:
+            return False, "用法：wel on/off | wel set <消息文本>"
+        sub = toks[0].lower()
+        wel_conf = self.state.setdefault("wel", {}).setdefault(str(gid), {"enabled": False, "msg": "欢迎 {user} 加入本群！"})
+        
+        if sub == "on":
+            wel_conf["enabled"] = True
+            self._save_state()
+            return True, "已开启入群欢迎"
+        elif sub == "off":
+            wel_conf["enabled"] = False
+            self._save_state()
+            return True, "已关闭入群欢迎"
+        elif sub == "set":
+            msg = " ".join(toks[1:]).strip()
+            if not msg:
+                return False, "用法：wel set <消息文本>（可用 {user} 占位符）"
+            wel_conf["msg"] = msg
+            self._save_state()
+            return True, f"已设置欢迎消息：{msg}"
+        return False, "未知子命令"
+
+    async def _do_bye(self, event, gid, toks: list) -> Tuple[bool, str]:
+        """退群提示：bye on/off/set <消息>"""
+        if not toks:
+            return False, "用法：bye on/off | bye set <消息文本>"
+        sub = toks[0].lower()
+        bye_conf = self.state.setdefault("bye", {}).setdefault(str(gid), {"enabled": False, "msg": "{user} 离开了本群"})
+        
+        if sub == "on":
+            bye_conf["enabled"] = True
+            self._save_state()
+            return True, "已开启退群提示"
+        elif sub == "off":
+            bye_conf["enabled"] = False
+            self._save_state()
+            return True, "已关闭退群提示"
+        elif sub == "set":
+            msg = " ".join(toks[1:]).strip()
+            if not msg:
+                return False, "用法：bye set <消息文本>（可用 {user} 占位符）"
+            bye_conf["msg"] = msg
+            self._save_state()
+            return True, f"已设置退群消息：{msg}"
+        return False, "未知子命令"
+
+    async def _do_bc(self, event, gid, toks: list) -> Tuple[bool, str]:
+        """群公告：bc <公告内容>"""
+        if not toks:
+            return False, "用法：bc <公告内容>"
+        content = " ".join(toks).strip()
+        try:
+            ob = self._ob(event)
+            await ob.call("_send_group_notice", group_id=int(gid), content=content)
+            return True, f"已发布群公告"
+        except Exception as e:
+            return False, f"发布公告失败: {e}"
+
+    async def _do_g(self, event, gid, toks: list) -> Tuple[bool, str]:
+        """群操作：g nn <新群名>"""
+        if not toks:
+            return False, "用法：g nn <新群名>"
+        sub = toks[0].lower()
+        if sub == "nn":
+            new_name = " ".join(toks[1:]).strip()
+            if not new_name:
+                return False, "用法：g nn <新群名>"
+            try:
+                ob = self._ob(event)
+                await ob.call("set_group_name", group_id=int(gid), group_name=new_name)
+                return True, f"已将群名改为：{new_name}"
+            except Exception as e:
+                return False, f"修改群名失败: {e}"
+        return False, "未知子命令（可用：nn=改名）"
+
     async def _dispatch(self, event: AstrMessageEvent, op: str, gid, toks: list) -> Tuple[bool, str]:
         if op == "timeout":
             try:
@@ -761,6 +1099,49 @@ class GroupMasterPlugin(Star):
             return await self._do_status(event, gid, target)
         if op == "admin":
             return await self._do_admin(event, gid, toks)
+        if op == "unmute":
+            target = extract_target_qq(event, toks, numeric_param_first=False)
+            if not target:
+                if chain_has_at_self(event):
+                    return False, "不能对机器人自己解禁。若要解禁他人：unmute <@用户/QQ号>"
+                return False, "用法：unmute <@用户/QQ号>"
+            return await self._do_unmute(event, gid, target)
+        if op == "mutelist":
+            return await self._do_mutelist(event, gid)
+        if op == "muteall":
+            try:
+                default_dur = int(self.config.get("default_mute_seconds", 600) or 600)
+                max_dur = int(self.config.get("max_mute_seconds", 2592000) or 2592000)
+            except Exception:
+                default_dur, max_dur = 600, 2592000
+            if any(t.isdigit() and int(t) == 0 for t in toks):
+                dur = 0
+            else:
+                dur = first_int(toks) or default_dur
+                dur = max(0, min(dur, max_dur))
+            return await self._do_muteall(event, gid, dur)
+        if op == "banlist":
+            return await self._do_banlist(event, gid)
+        if op == "title":
+            return await self._do_title(event, gid, toks)
+        if op == "sw":
+            return await self._do_sw(event, gid, toks)
+        if op == "antiflood":
+            return await self._do_antiflood(event, gid, toks)
+        if op == "cardcheck":
+            return await self._do_cardcheck(event, gid, toks)
+        if op == "ad":
+            return await self._do_ad(event, gid, toks)
+        if op == "adban":
+            return await self._do_adban(event, gid, toks)
+        if op == "wel":
+            return await self._do_wel(event, gid, toks)
+        if op == "bye":
+            return await self._do_bye(event, gid, toks)
+        if op == "bc":
+            return await self._do_bc(event, gid, toks)
+        if op == "g":
+            return await self._do_g(event, gid, toks)
         return False, f"未知操作: {op}"
 
     # ---------------- 命令入口 ----------------
@@ -862,6 +1243,91 @@ class GroupMasterPlugin(Star):
         """status [@用户/QQ号]：查询本群禁言/警告/拉黑状态与理由，无参=全群总览（仅本群群主/管理员）。"""
         async for r in self._run_command(event, "status"):
             yield r
+
+    @filter.command("unmute")
+    async def cmd_unmute(self, event: AstrMessageEvent):
+        """unmute <@用户/QQ号>：解除该用户的禁言。"""
+        async for r in self._run_command(event, "unmute"):
+            yield r
+
+    @filter.command("mutelist")
+    async def cmd_mutelist(self, event: AstrMessageEvent):
+        """mutelist：列出当前群所有被禁言的成员。"""
+        async for r in self._run_command(event, "mutelist"):
+            yield r
+
+    @filter.command("muteall")
+    async def cmd_muteall(self, event: AstrMessageEvent):
+        """muteall [时长秒数|0]：开启全员禁言（0=关闭）。"""
+        async for r in self._run_command(event, "muteall"):
+            yield r
+
+    @filter.command("banlist")
+    async def cmd_banlist(self, event: AstrMessageEvent):
+        """banlist：列出当前群拉黑名单。"""
+        async for r in self._run_command(event, "banlist"):
+            yield r
+
+    @filter.command("title")
+    async def cmd_title(self, event: AstrMessageEvent):
+        """title <@用户> <头衔文本>：设置群成员头衔。"""
+        async for r in self._run_command(event, "title"):
+            yield r
+
+    @filter.command("sw")
+    async def cmd_sw(self, event: AstrMessageEvent):
+        """sw add/del/list/on/off/set：敏感词管理。"""
+        async for r in self._run_command(event, "sw"):
+            yield r
+
+    @filter.command("antiflood")
+    async def cmd_antiflood(self, event: AstrMessageEvent):
+        """antiflood on/off/set：刷屏检测。"""
+        async for r in self._run_command(event, "antiflood"):
+            yield r
+
+    @filter.command("cardcheck")
+    async def cmd_cardcheck(self, event: AstrMessageEvent):
+        """cardcheck on/off：名片检测。"""
+        async for r in self._run_command(event, "cardcheck"):
+            yield r
+
+    @filter.command("ad")
+    async def cmd_ad(self, event: AstrMessageEvent):
+        """ad on/off/set：广告检测。"""
+        async for r in self._run_command(event, "ad"):
+            yield r
+
+    @filter.command("adban")
+    async def cmd_adban(self, event: AstrMessageEvent):
+        """adban mute/kick/ban：广告拦截行为。"""
+        async for r in self._run_command(event, "adban"):
+            yield r
+
+    @filter.command("wel")
+    async def cmd_wel(self, event: AstrMessageEvent):
+        """wel on/off/set：入群欢迎。"""
+        async for r in self._run_command(event, "wel"):
+            yield r
+
+    @filter.command("bye")
+    async def cmd_bye(self, event: AstrMessageEvent):
+        """bye on/off/set：退群提示。"""
+        async for r in self._run_command(event, "bye"):
+            yield r
+
+    @filter.command("bc")
+    async def cmd_bc(self, event: AstrMessageEvent):
+        """bc <公告内容>：发布群公告。"""
+        async for r in self._run_command(event, "bc"):
+            yield r
+
+    @filter.command("g")
+    async def cmd_g(self, event: AstrMessageEvent):
+        """g nn <新群名>：群操作。"""
+        async for r in self._run_command(event, "g"):
+            yield r
+
 
     # ---------------- LLM 工具（@Bot 自然语言兜底） ----------------
     def _llm_group_gate(self, event: AstrMessageEvent) -> Optional[str]:
@@ -1046,6 +1512,347 @@ class GroupMasterPlugin(Star):
             ok, msg = False, f"异常: {e}"
         return ("✅ " if ok else "❌ ") + msg
 
+    # ---------------- LLM 自然语言兜底：信息查询 / 互动工具（v1.1.0） ----------------
+    # 这 9 个工具与上方 11 个管理类工具共用 _llm_group_gate / _llm_perm_gate 权限门；
+    # 信息类工具（查询群/成员/历史）权限与群主/管理员一致。
+    async def _data_res(self, res):
+        """从 _ob 返回值提取 data 字段（call_action 有时直接返 data，有时套 data）。"""
+        if isinstance(res, dict) and isinstance(res.get("data"), (dict, list)):
+            return res["data"]
+        return res
+
+    @llm_tool(name="gm_get_group_info")
+    async def tool_get_group_info(self, event: AstrMessageEvent):
+        """查询当前群的基本信息（群号、群名称、群成员数等）。仅群聊可用。"""
+        gid = self._llm_group_gate(event)
+        if not gid:
+            return "该操作仅能在群聊中使用。"
+        err = await self._llm_perm_gate(event)
+        if err:
+            return err
+        try:
+            res = await self._data_res(await self._ob(event, "get_group_info", group_id=int(gid), no_cache=True))
+            if not isinstance(res, dict):
+                return "❌ 群信息不可查"
+            name = res.get("group_name", "") or res.get("name", "")
+            members = res.get("member_count", "") or res.get("total_member_count", "")
+            owner = res.get("owner_id", "") or res.get("group_owner", "")
+            max_m = res.get("max_member_count", "")
+            lines = [f"📌 群 {gid}｜{name or '（无名）'}"]
+            if members != "":
+                lines.append(f"   👥 成员数：{members}" + (f"/{max_m}" if max_m else ""))
+            if owner:
+                lines.append(f"   👑 群主：{owner}")
+            # 拼接一些常见字段
+            extras = []
+            for k in ("group_level", "create_time"):
+                if res.get(k) not in (None, ""):
+                    extras.append(f"{k}={res.get(k)}")
+            if extras:
+                lines.append("   ℹ️ " + " ｜ ".join(extras))
+            return "\n".join(lines)
+        except Exception as e:
+            return f"❌ 群信息查询失败：{e}"
+
+    @llm_tool(name="gm_get_member_info")
+    async def tool_get_member_info(self, event: AstrMessageEvent, user_id: str):
+        """查询当前群内指定成员的详细信息（群名片、角色、加群时间、最后发言等）。user_id 为目标 QQ 号。仅群聊可用。"""
+        gid = self._llm_group_gate(event)
+        if not gid:
+            return "该操作仅能在群聊中使用。"
+        err = await self._llm_perm_gate(event)
+        if err:
+            return err
+        uid = str(user_id or "").strip()
+        if not uid.isdigit():
+            return "❌ user_id 必须是纯数字 QQ 号"
+        try:
+            res = await self._data_res(await self._ob(
+                event, "get_group_member_info",
+                group_id=int(gid), user_id=int(uid), no_cache=True,
+            ))
+            if not isinstance(res, dict):
+                return f"❌ 未找到成员 {uid}（可能已退群）"
+            role = res.get("role", "") or "未知"
+            role_cn = {"owner": "群主", "admin": "管理员", "member": "成员"}.get(role, role)
+            card = res.get("card", "") or res.get("nickname", "") or ""
+            nick = res.get("nickname", "")
+            title = res.get("title", "")  # 专属头衔
+            join_ts = res.get("join_time", 0) or 0
+            last_ts = res.get("last_sent_time", 0) or 0
+            shut = res.get("shut_up_timestamp", 0) or 0
+            lines = [
+                f"👤 {uid}｜{card or '（无群名片）'}",
+                f"   🆔 昵称：{nick}" if nick and nick != card else None,
+                f"   🛡️ 群身份：{role_cn}",
+                f"   🎖️ 专属头衔：{title}" if title else None,
+                f"   📅 加群时间：{self._fmt_ts(join_ts)}" if join_ts else None,
+                f"   💬 最后发言：{self._fmt_ts(last_ts)}" if last_ts else None,
+            ]
+            if shut and int(shut) > int(time.time()):
+                lines.append(f"   🔇 禁言至：{self._fmt_ts(shut)}")
+            return "\n".join([x for x in lines if x])
+        except Exception as e:
+            return f"❌ 成员信息查询失败：{e}"
+
+    @llm_tool(name="gm_get_member_list")
+    async def tool_get_member_list(self, event: AstrMessageEvent, limit: int = 30):
+        """获取当前群的成员列表（默认 30 个，最多 200）。返回 QQ 号 + 群名片 + 角色。仅群聊可用。"""
+        gid = self._llm_group_gate(event)
+        if not gid:
+            return "该操作仅能在群聊中使用。"
+        err = await self._llm_perm_gate(event)
+        if err:
+            return err
+        try:
+            n = max(1, min(int(limit), 200))
+            res = await self._data_res(await self._ob(event, "get_group_member_list", group_id=int(gid), no_cache=True))
+            members = res if isinstance(res, list) else []
+            role_cn = {"owner": "👑", "admin": "🛡️", "member": "  "}
+            lines = [f"👥 群 {gid} 成员（前 {min(n, len(members))}/{len(members)}）："]
+            for m in members[:n]:
+                if not isinstance(m, dict):
+                    continue
+                uid = str(m.get("user_id", "") or "")
+                if not uid:
+                    continue
+                card = m.get("card", "") or m.get("nickname", "") or ""
+                role = m.get("role", "member")
+                lines.append(f"  {role_cn.get(role, '  ')} {uid}｜{card}")
+            if len(lines) == 1:
+                return "❌ 成员列表为空（可能无权限或群空）"
+            return "\n".join(lines)
+        except Exception as e:
+            return f"❌ 成员列表查询失败：{e}"
+
+    @llm_tool(name="gm_get_msg_history")
+    async def tool_get_msg_history(self, event: AstrMessageEvent, count: int = 20, user_id: str = ""):
+        """读取当前群最近的消息历史（默认 20 条，最多 100）。可选 user_id 只看某用户的消息。仅群聊可用。"""
+        gid = self._llm_group_gate(event)
+        if not gid:
+            return "该操作仅能在群聊中使用。"
+        err = await self._llm_perm_gate(event)
+        if err:
+            return err
+        try:
+            n = max(1, min(int(count), 100))
+            target_uid = str(user_id or "").strip()
+            res = await self._data_res(await self._ob(
+                event, "get_group_msg_history",
+                group_id=int(gid), message_seq=None, count=n,
+            ))
+            # 兼容 get_group_msg_history 的多种返回形态
+            messages = []
+            if isinstance(res, dict):
+                messages = res.get("messages", []) or []
+            elif isinstance(res, list):
+                messages = res
+            if not messages:
+                return "❌ 历史消息为空（可能无权限或 NapCat 未启用）"
+            if target_uid:
+                messages = [m for m in messages if str((m or {}).get("user_id", "")) == target_uid]
+            if not messages:
+                return f"❌ 该用户 {target_uid} 在最近 {n} 条消息内没有发言"
+            lines = [f"📜 群 {gid} 最近 {min(n, len(messages))} 条消息" + (f"（只看 {target_uid}）" if target_uid else "")]
+            for m in messages:
+                if not isinstance(m, dict):
+                    continue
+                mid = m.get("message_id", "")
+                sender = m.get("sender", {}) if isinstance(m.get("sender"), dict) else {}
+                uid = str(sender.get("user_id", m.get("user_id", "")) or "")
+                nick = sender.get("nickname", "") or ""
+                ts = int(m.get("time", 0) or 0)
+                # 提取纯文本（忽略 image/face/at 等组件）
+                raw = m.get("message", "")
+                txt = ""
+                if isinstance(raw, list):
+                    parts = []
+                    for seg in raw:
+                        if isinstance(seg, dict):
+                            t = seg.get("type", "")
+                            if t == "text":
+                                parts.append(seg.get("data", {}).get("text", ""))
+                            elif t == "at":
+                                parts.append("@" + str(seg.get("data", {}).get("qq", "")))
+                    txt = "".join(parts)
+                else:
+                    txt = str(raw or "")
+                txt = (txt or "").replace("\n", " ").strip()[:120]
+                lines.append(f"  [{self._fmt_ts(ts)}] {uid}({nick})：{txt or '（非文本消息）'}")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"❌ 历史消息查询失败：{e}"
+
+    @llm_tool(name="gm_at_member")
+    async def tool_at_member(self, event: AstrMessageEvent, user_id: str, text: str = ""):
+        """在当前群中以 At 形式发一条消息 @ 指定成员。user_id 为目标 QQ 号，text 为附带文本（可空）。仅群聊可用。"""
+        gid = self._llm_group_gate(event)
+        if not gid:
+            return "该操作仅能在群聊中使用。"
+        err = await self._llm_perm_gate(event)
+        if err:
+            return err
+        uid = str(user_id or "").strip()
+        if not uid.isdigit():
+            return "❌ user_id 必须是纯数字 QQ 号"
+        try:
+            chain = [At(qq=int(uid)), Plain(" " + (str(text or "").strip()))]
+            from astrbot.core.message.message_event_result import MessageChain
+            await event.send(MessageChain(chain=chain))
+            return "✅ 已发送 @ 消息"
+        except Exception as e:
+            return f"❌ 发送失败：{e}"
+
+    @llm_tool(name="gm_at_all")
+    async def tool_at_all(self, event: AstrMessageEvent, text: str = ""):
+        """在当前群中 @全体成员（需机器人具备管理员或群主身份）。text 为附带文本（可空）。仅群聊可用。"""
+        gid = self._llm_group_gate(event)
+        if not gid:
+            return "该操作仅能在群聊中使用。"
+        err = await self._llm_perm_gate(event)
+        if err:
+            return err
+        bot_ok, bot_msg = await self._bot_gate(event, gid, need_owner=False)
+        if not bot_ok:
+            return f"❌ {bot_msg}"
+        try:
+            chain = [At(qq="all"), Plain(" " + (str(text or "").strip()))]
+            from astrbot.core.message.message_event_result import MessageChain
+            await event.send(MessageChain(chain=chain))
+            return "✅ 已 @全体成员"
+        except Exception as e:
+            return f"❌ 发送失败：{e}"
+
+    @llm_tool(name="gm_set_group_card")
+    async def tool_set_card(self, event: AstrMessageEvent, user_id: str, card: str = ""):
+        """修改当前群内指定成员的群名片。user_id 为目标 QQ 号，card 为新群名片（空字符串=清空）。仅群聊可用。"""
+        gid = self._llm_group_gate(event)
+        if not gid:
+            return "该操作仅能在群聊中使用。"
+        err = await self._llm_perm_gate(event)
+        if err:
+            return err
+        bot_ok, bot_msg = await self._bot_gate(event, gid, need_owner=False)
+        if not bot_ok:
+            return f"❌ {bot_msg}"
+        uid = str(user_id or "").strip()
+        if not uid.isdigit():
+            return "❌ user_id 必须是纯数字 QQ 号"
+        try:
+            await self._ob(event, "set_group_card", group_id=int(gid), user_id=int(uid), card=str(card or "")[:60])
+            return f"✅ 已将 {uid} 的群名片改为：{card or '（已清空）'}"
+        except Exception as e:
+            return f"❌ 修改群名片失败：{e}"
+
+    @llm_tool(name="gm_set_group_essence")
+    async def tool_set_essence(self, event: AstrMessageEvent, message_id: str):
+        """将指定消息设为群精华（再次调用同一 message_id 取消精华）。message_id 为消息 ID（可从 get_msg_history 获取）。仅群聊可用。"""
+        gid = self._llm_group_gate(event)
+        if not gid:
+            return "该操作仅能在群聊中使用。"
+        err = await self._llm_perm_gate(event)
+        if err:
+            return err
+        bot_ok, bot_msg = await self._bot_gate(event, gid, need_owner=False)
+        if not bot_ok:
+            return f"❌ {bot_msg}"
+        mid = str(message_id or "").strip()
+        if not mid.isdigit():
+            return "❌ message_id 必须是纯数字"
+        try:
+            # OneBot v11 没有 set_essence 的标准动作；用 NapCat 扩展的 set_essence_message
+            try:
+                await self._ob(event, "set_essence_message", message_id=int(mid))
+                return f"✅ 已将消息 {mid} 设为群精华"
+            except Exception:
+                # 兜底：有些适配器叫 delete_essence_message 取消
+                await self._ob(event, "delete_essence_message", message_id=int(mid))
+                return f"✅ 已取消消息 {mid} 的精华"
+        except Exception as e:
+            return f"❌ 设置精华失败：{e}"
+
+    @llm_tool(name="gm_send_group_notice")
+    async def tool_send_notice(self, event: AstrMessageEvent, content: str):
+        """在当前群发布一条群公告。content 为公告内容（建议 50 字以内）。仅群聊可用。"""
+        gid = self._llm_group_gate(event)
+        if not gid:
+            return "该操作仅能在群聊中使用。"
+        err = await self._llm_perm_gate(event)
+        if err:
+            return err
+        bot_ok, bot_msg = await self._bot_gate(event, gid, need_owner=False)
+        if not bot_ok:
+            return f"❌ {bot_msg}"
+        text = (content or "").strip()
+        if not text:
+            return "❌ 公告内容不能为空"
+        if len(text) > 200:
+            text = text[:200]
+        try:
+            # NapCat / go-cqhttp 的动作名：_send_group_notice；OneBot v11 标准为 send_group_notice
+            try:
+                await self._ob(event, "_send_group_notice", group_id=int(gid), content=text)
+            except Exception:
+                await self._ob(event, "send_group_notice", group_id=int(gid), content=text)
+            return f"✅ 已发布群公告：{text[:30]}{'…' if len(text) > 30 else ''}"
+        except Exception as e:
+            return f"❌ 群公告发布失败：{e}"
+
+    # ---------------- LLM 请求阶段：注入 AT 标签提示词 ----------------
+    @filter.on_llm_request()
+    async def inject_at_instruction(self, event: AstrMessageEvent, req: ProviderRequest):
+        """在 LLM 实际请求前，给 system_prompt 追加 AT 标签用法提示，让大模型在需要时输出 [at:QQ] / [at:all]。
+        通过配置开关 enable_at_feature 控制（默认开）。
+        """
+        if not self.config.get("enable_at_feature", True):
+            return
+        # 仅在群聊中注入（私聊也允许 @ Bot 自己，但 [at:all] 无意义；保险起见仅限群）
+        try:
+            if not event.get_group_id():
+                return
+        except Exception:
+            return
+        req.system_prompt = (req.system_prompt or "") + AT_INSTRUCTION
+
+    # ---------------- LLM 装饰阶段：把 [at:QQ] / [at:all] 转原生 At 组件 ----------------
+    @filter.on_decorating_result(priority=10)
+    async def process_at_tags(self, event: AstrMessageEvent):
+        """把 LLM 输出 Plain 文本中的 [at:QQ] / [at:all] 标签解析为原生 At 组件（参考 QQ群大模型管理工具）。
+        关闭后 = 不做替换，标签原样发出。
+        """
+        if not self.config.get("enable_at_feature", True):
+            return
+        try:
+            result = event.get_result()
+        except Exception:
+            return
+        if not result or not getattr(result, "chain", None):
+            return
+        new_chain: List[BaseMessageComponent] = []
+        hit = False
+        for comp in result.chain:
+            if isinstance(comp, Plain) and "[at:" in (comp.text or ""):
+                hit = True
+                text = comp.text
+                last = 0
+                for m in AT_PATTERN.finditer(text):
+                    s, e = m.span()
+                    if s > last:
+                        new_chain.append(Plain(text[last:s]))
+                    uid = m.group("uid")
+                    if uid.isdigit():
+                        new_chain.append(At(qq=uid))
+                    else:
+                        new_chain.append(At(qq="all"))
+                    new_chain.append(Plain(" "))
+                    last = e
+                if last < len(text):
+                    new_chain.append(Plain(text[last:]))
+            else:
+                new_chain.append(comp)
+        if hit:
+            result.chain = new_chain
+
     # ---------------- 拉黑用户入群申请自动拒绝 ----------------
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_group_request(self, event: AstrMessageEvent):
@@ -1081,6 +1888,272 @@ class GroupMasterPlugin(Star):
             logger.error(f"{LOG} 拒绝入群申请失败（群 {gid} 用户 {uid}）: {e}")
         event.stop_event()
 
+    @llm_tool(name="gm_unmute_user")
+    async def tool_unmute(self, event: AstrMessageEvent, user_id: str):
+        """解除当前群内指定用户的禁言。user_id 为目标 QQ 号。仅群聊可用。"""
+        gid = self._llm_group_gate(event)
+        if not gid:
+            return "该操作仅能在群聊中使用。"
+        err = await self._llm_perm_gate(event)
+        if err:
+            return err
+        try:
+            ok, msg = await self._do_unmute(event, gid, str(user_id))
+        except Exception as e:
+            ok, msg = False, f"异常: {e}"
+        return ("✅ " if ok else "❌ ") + msg
+
+    @llm_tool(name="gm_muteall_toggle")
+    async def tool_muteall(self, event: AstrMessageEvent, duration_sec: int = 0):
+        """开启/关闭当前群全员禁言。duration_sec=0 表示关闭，>0 表示开启（注意：QQ 全员禁言需手动关闭）。仅群聊可用。"""
+        gid = self._llm_group_gate(event)
+        if not gid:
+            return "该操作仅能在群聊中使用。"
+        err = await self._llm_perm_gate(event)
+        if err:
+            return err
+        try:
+            ok, msg = await self._do_muteall(event, gid, int(duration_sec))
+        except Exception as e:
+            ok, msg = False, f"异常: {e}"
+        return ("✅ " if ok else "❌ ") + msg
+
+    @llm_tool(name="gm_set_title")
+    async def tool_set_title(self, event: AstrMessageEvent, user_id: str, title: str):
+        """设置当前群内指定用户的头衔。user_id 为目标 QQ 号，title 为头衔文本。仅群聊可用。"""
+        gid = self._llm_group_gate(event)
+        if not gid:
+            return "该操作仅能在群聊中使用。"
+        err = await self._llm_perm_gate(event)
+        if err:
+            return err
+        try:
+            # 构造假的 toks 以复用 _do_title
+            toks = [str(user_id), str(title)]
+            ok, msg = await self._do_title(event, gid, toks)
+        except Exception as e:
+            ok, msg = False, f"异常: {e}"
+        return ("✅ " if ok else "❌ ") + msg
+
+    @llm_tool(name="gm_send_group_notice")
+    async def tool_send_notice(self, event: AstrMessageEvent, content: str):
+        """发布当前群公告。content 为公告内容。仅群聊可用。"""
+        gid = self._llm_group_gate(event)
+        if not gid:
+            return "该操作仅能在群聊中使用。"
+        err = await self._llm_perm_gate(event)
+        if err:
+            return err
+        try:
+            toks = [str(content)]
+            ok, msg = await self._do_bc(event, gid, toks)
+        except Exception as e:
+            ok, msg = False, f"异常: {e}"
+        return ("✅ " if ok else "❌ ") + msg
+
+
+
+    async def initialize(self):
+        """插件加载后启动后台任务。"""
+        import asyncio
+        # 启动超长禁言续期任务
+        task = asyncio.create_task(self._mute_renewal_ticker())
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        logger.info(f"{LOG} 插件已加载 v1.1.0，后台任务已启动")
+
+    async def _mute_renewal_ticker(self):
+        """后台任务：每分钟检查超长禁言续期。"""
+        import asyncio
+        while True:
+            try:
+                await asyncio.sleep(60)
+                await self._renew_long_mutes()
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                logger.warning(f"{LOG} 禁言续期任务异常: {e}")
+
+    async def _renew_long_mutes(self):
+        """扫描超长禁言记录，到期前续期下一段。"""
+        import time
+        now = int(time.time())
+        memo = self.state.get("mute_memo", {})
+        renewed_count = 0
+        for gid, users in list(memo.items()):
+            for uid, exp in list(users.items()):
+                if exp <= now:
+                    continue
+                remaining = exp - now
+                if remaining <= MUTE_CHUNK:
+                    continue
+                # 检查是否到了续期时间
+                renew_key = f"renew_{gid}_{uid}"
+                last_renew = self.state.get("last_renew", {}).get(renew_key, 0)
+                if now - last_renew < MUTE_CHUNK - RENEW_LEAD:
+                    continue
+                # 执行续期（需要通过 platform_manager 获取 client）
+                try:
+                    client = None
+                    for platform in self.context.platform_manager.platform_insts:
+                        if platform.meta().name == "aiocqhttp":
+                            client = platform.get_client()
+                            break
+                    if not client:
+                        continue
+                    chunk = min(remaining, MUTE_CHUNK)
+                    await client.api.call_action("set_group_ban", group_id=int(gid), user_id=int(uid), duration=chunk)
+                    self.state.setdefault("last_renew", {})[renew_key] = now
+                    self._save_state()
+                    renewed_count += 1
+                    logger.info(f"{LOG} 已为 {uid}@{gid} 续期禁言，剩余 {remaining//3600}小时")
+                except Exception as e:
+                    logger.warning(f"{LOG} 续期禁言失败（群{gid} 用户{uid}）: {e}")
+        if renewed_count > 0:
+            logger.info(f"{LOG} 本轮续期了 {renewed_count} 个超长禁言")
+
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=3)
+    async def on_group_notice_events(self, event: AstrMessageEvent):
+        """群成员增减事件统一入口"""
+        raw = getattr(event.message_obj, "raw_message", None)
+        if not isinstance(raw, dict):
+            return
+        
+        notice_type = raw.get("notice_type")
+        if notice_type == "group_increase":
+            await self._on_member_join(event, raw)
+        elif notice_type == "group_decrease":
+            await self._on_member_leave(event, raw)
+    
+    async def _on_member_join(self, event: AstrMessageEvent, raw: dict):
+        """成员入群：欢迎消息 + 名片检测"""
+        gid = str(raw.get("group_id") or "")
+        if not gid:
+            return
+        
+        # 欢迎消息
+        wel_conf = self.state.get("wel", {}).get(gid, {})
+        if wel_conf.get("enabled"):
+            try:
+                new_uid = str(raw.get("user_id") or "")
+                if not new_uid:
+                    return
+                msg = wel_conf.get("msg", "欢迎 {user} 加入本群！")
+                msg = msg.replace("{user}", f"[CQ:at,qq={new_uid}]")
+                ob = self._ob(event)
+                await ob.call("send_group_msg", group_id=int(gid), message=msg)
+            except Exception as e:
+                logger.warning(f"{LOG} 发送欢迎消息失败: {e}")
+        
+        # 名片检测（简化版：检查昵称是否含特定关键词，实际可扩展）
+        card_conf = self.state.get("cardcheck", {}).get(gid, {})
+        if card_conf.get("enabled"):
+            # 占位实现：真实场景需获取成员信息并检查名片
+            pass
+
+    async def _on_member_leave(self, event: AstrMessageEvent, raw: dict):
+        """成员退群：退群提示"""
+        gid = str(raw.get("group_id") or "")
+        if not gid:
+            return
+        
+        bye_conf = self.state.get("bye", {}).get(gid, {})
+        if bye_conf.get("enabled"):
+            try:
+                left_uid = str(raw.get("user_id") or "")
+                if not left_uid:
+                    return
+                msg = bye_conf.get("msg", "{user} 离开了本群")
+                msg = msg.replace("{user}", left_uid)
+                ob = self._ob(event)
+                await ob.call("send_group_msg", group_id=int(gid), message=msg)
+            except Exception as e:
+                logger.warning(f"{LOG} 发送退群提示失败: {e}")
+
+    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=5)
+    async def on_group_message(self, event: AstrMessageEvent):
+        """监听群消息：敏感词/刷屏/广告检测"""
+        if not self._is_group(event):
+            return
+        gid = str(event.get_group_id())
+        uid = str(event.get_sender_id())
+        msg_text = event.message_str or ""
+        
+        # 敏感词检测
+        sw_conf = self.state.get("sw", {}).get(gid, {})
+        if sw_conf.get("enabled"):
+            words = sw_conf.get("words", [])
+            for word in words:
+                if word in msg_text:
+                    try:
+                        dur = sw_conf.get("duration", DEFAULT_SW_DURATION)
+                        ob = self._ob(event)
+                        await ob.call("delete_msg", message_id=event.message_obj.message_id)
+                        await ob.call("set_group_ban", group_id=int(gid), user_id=int(uid), duration=dur)
+                        logger.info(f"{LOG} 敏感词触发：群{gid} 用户{uid} 触发[{word}]，禁言{dur}秒")
+                    except Exception as e:
+                        logger.warning(f"{LOG} 敏感词处理失败: {e}")
+                    return
+        
+        # 刷屏检测（简化版：滑动窗口计数）
+        flood_conf = self.state.get("flood", {}).get(gid, {})
+        if flood_conf.get("enabled"):
+            import time
+            now = int(time.time())
+            threshold = flood_conf.get("threshold", DEFAULT_FLOOD_THRESHOLD)
+            window = flood_conf.get("window", DEFAULT_FLOOD_WINDOW)
+            
+            flood_state = self.state.setdefault("flood_state", {}).setdefault(gid, {})
+            user_msgs = flood_state.setdefault(uid, [])
+            user_msgs.append(now)
+            # 清理过期记录
+            user_msgs[:] = [t for t in user_msgs if now - t <= window]
+            
+            if len(user_msgs) >= threshold:
+                try:
+                    ob = self._ob(event)
+                    await ob.call("set_group_ban", group_id=int(gid), user_id=int(uid), duration=600)
+                    logger.info(f"{LOG} 刷屏触发：群{gid} 用户{uid} {window}秒内{len(user_msgs)}条消息")
+                    user_msgs.clear()
+                except Exception as e:
+                    logger.warning(f"{LOG} 刷屏处理失败: {e}")
+                return
+        
+        # 广告检测（简化版：评分制）
+        ad_conf = self.state.get("ad", {}).get(gid, {})
+        if ad_conf.get("enabled"):
+            score = 0
+            # 简单启发式：包含链接+联系方式
+            if "http://" in msg_text or "https://" in msg_text:
+                score += 5
+            if any(k in msg_text for k in ["加群", "扫码", "微信", "QQ群"]):
+                score += 3
+            if any(k in msg_text for k in ["优惠", "代购", "刷单", "兼职"]):
+                score += 4
+            
+            threshold = ad_conf.get("threshold", DEFAULT_AD_THRESHOLD)
+            if score >= threshold:
+                action = ad_conf.get("action", "mute")
+                try:
+                    ob = self._ob(event)
+                    await ob.call("delete_msg", message_id=event.message_obj.message_id)
+                    if action == "ban":
+                        await ob.call("set_group_kick", group_id=int(gid), user_id=int(uid), reject_add_request=True)
+                    elif action == "kick":
+                        await ob.call("set_group_kick", group_id=int(gid), user_id=int(uid))
+                    else:  # mute
+                        await ob.call("set_group_ban", group_id=int(gid), user_id=int(uid), duration=3600)
+                    logger.info(f"{LOG} 广告拦截：群{gid} 用户{uid} 评分{score}，执行{action}")
+                except Exception as e:
+                    logger.warning(f"{LOG} 广告处理失败: {e}")
+
     async def terminate(self):
         """插件卸载清理。"""
+        # 取消所有后台任务
+        for task in self._tasks:
+            if not task.done():
+                task.cancel()
+        if self._tasks:
+            import asyncio
+            await asyncio.gather(*self._tasks, return_exceptions=True)
         logger.info(f"{LOG} 插件已卸载")
