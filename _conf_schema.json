@@ -33,6 +33,12 @@
         "hint": "被 ban 拉黑的用户再次申请入群时收到的拒绝提示",
         "type": "string",
         "default": "你已被本群拉黑，如有疑问请联系群管理"
+      },
+      "enable_at_feature": {
+        "description": "开启 LLM @ 成员功能",
+        "hint": "开启后：① LLM 看到 system_prompt 末尾追加【艾特成员提示】，可用 [at:QQ号] / [at:all] 标签在回复里 @ 成员或全体成员；② 插件在 on_decorating_result 阶段把 LLM 输出中的 [at:QQ号] / [at:all] 标签解析为平台原生 At 组件。关闭后标签原样发出。",
+        "type": "bool",
+        "default": true
       }
     }
   }
