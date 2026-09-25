@@ -1,5 +1,5 @@
 """
-AstrBot 群管插件 astrbot_plugin_groupmaster v1.1.0
+AstrBot 群管插件 astrbot_plugin_groupmaster v1.1.1
 
 命令（仅群聊可用；仅本群群主/管理员可使用；群内需 @Bot 或唤醒前缀触发；"@"目标也可以直接输 QQ 号）：
   timeout [all] <秒数> <@用户>   禁言指定用户（秒）；all=机器人管理的所有群
@@ -231,7 +231,7 @@ def find_reply_id(event: AstrMessageEvent) -> Optional[str]:
     "astrbot_plugin_groupmaster",
     "Wolfe",
     "QQ群管插件：timeout/kick/ban/warn/recall/mute/admin/status，支持@或QQ号定位、理由记录、跨群 all 批量执行与 LLM 自然语言兜底；仅群聊可用，仅本群群主/管理员可使用。",
-    "1.1.0",
+    "1.1.1",
     "",
 )
 class GroupMasterPlugin(Star):
@@ -745,8 +745,7 @@ class GroupMasterPlugin(Star):
         if target == str(event.get_self_id()):
             return False, "不能对机器人自己解禁"
         try:
-            ob = self._ob(event)
-            await ob.call("set_group_ban", group_id=int(gid), user_id=int(target), duration=0)
+            await self._ob(event, "set_group_ban", group_id=int(gid), user_id=int(target), duration=0)
             # 清理超长禁言记录
             memo = self.state.get("mute_memo", {}).get(str(gid), {})
             if str(target) in memo:
@@ -759,12 +758,11 @@ class GroupMasterPlugin(Star):
     async def _do_muteall(self, event, gid, dur: int) -> Tuple[bool, str]:
         """全员禁言指定时长（秒），0=关闭"""
         try:
-            ob = self._ob(event)
             if dur == 0:
-                await ob.call("set_group_whole_ban", group_id=int(gid), enable=False)
+                await self._ob(event, "set_group_whole_ban", group_id=int(gid), enable=False)
                 return True, "已关闭全员禁言"
             else:
-                await ob.call("set_group_whole_ban", group_id=int(gid), enable=True)
+                await self._ob(event, "set_group_whole_ban", group_id=int(gid), enable=True)
                 # 注意：QQ 的全员禁言没有自动到期，需手动关闭或用定时任务
                 return True, f"已开启全员禁言（需手动关闭或设定时任务 {dur}秒后关闭）"
         except Exception as e:
@@ -773,8 +771,9 @@ class GroupMasterPlugin(Star):
     async def _do_mutelist(self, event, gid) -> Tuple[bool, str]:
         """列出当前群所有被禁言的成员"""
         try:
-            ob = self._ob(event)
-            members = await ob.call("get_group_member_list", group_id=int(gid))
+            res = await self._ob(event, "get_group_member_list", group_id=int(gid))
+            members = await self._data_res(res)
+            members = [m for m in members if isinstance(m, dict)] if isinstance(members, list) else []
             if not members:
                 return False, "获取成员列表失败"
             
@@ -817,8 +816,7 @@ class GroupMasterPlugin(Star):
         if not title_text:
             return False, "请提供头衔文本"
         try:
-            ob = self._ob(event)
-            await ob.call("set_group_special_title", group_id=int(gid), user_id=int(target), special_title=title_text, duration=-1)
+            await self._ob(event, "set_group_special_title", group_id=int(gid), user_id=int(target), special_title=title_text, duration=-1)
             return True, f"已设置 {target} 的头衔为 {title_text}"
         except Exception as e:
             return False, f"设置头衔失败: {e}"
@@ -1001,28 +999,42 @@ class GroupMasterPlugin(Star):
             return False, "用法：bc <公告内容>"
         content = " ".join(toks).strip()
         try:
-            ob = self._ob(event)
-            await ob.call("_send_group_notice", group_id=int(gid), content=content)
+            await self._ob(event, "_send_group_notice", group_id=int(gid), content=content)
             return True, f"已发布群公告"
         except Exception as e:
             return False, f"发布公告失败: {e}"
 
     async def _do_g(self, event, gid, toks: list) -> Tuple[bool, str]:
-        """群操作：g nn <新群名>"""
+        """群操作：g nn/name <新群名>（改群名）；g card <@用户/QQ号> <新名片>（改名片）"""
         if not toks:
-            return False, "用法：g nn <新群名>"
+            return False, "用法：g nn/name <新群名> 或 g card <@用户/QQ号> <新名片>"
         sub = toks[0].lower()
-        if sub == "nn":
+        if sub in ("nn", "name", "rename", "群名", "改名"):
             new_name = " ".join(toks[1:]).strip()
             if not new_name:
-                return False, "用法：g nn <新群名>"
+                return False, "用法：g nn/name <新群名>"
             try:
-                ob = self._ob(event)
-                await ob.call("set_group_name", group_id=int(gid), group_name=new_name)
+                await self._ob(event, "set_group_name", group_id=int(gid), group_name=new_name)
                 return True, f"已将群名改为：{new_name}"
             except Exception as e:
                 return False, f"修改群名失败: {e}"
-        return False, "未知子命令（可用：nn=改名）"
+        if sub in ("card", "名片"):
+            target = extract_target_qq(event, toks[1:], numeric_param_first=False)
+            if not target:
+                return False, "用法：g card <@用户/QQ号> <新名片>"
+            rest = [t for t in toks[1:] if t != target and not AT_RE.search(t)]
+            new_card = " ".join(rest).strip()[:60]
+            if not new_card:
+                return False, "用法：g card <@用户/QQ号> <新名片>"
+            ok, msg = await self._bot_gate(event, gid, need_owner=False)
+            if not ok:
+                return False, msg
+            try:
+                await self._ob(event, "set_group_card", group_id=int(gid), user_id=int(target), card=new_card)
+                return True, f"已将 {target} 的群名片改为：{new_card}"
+            except Exception as e:
+                return False, f"修改群名片失败: {e}"
+        return False, "未知子命令（可用：nn/name=改名，card=改名片）"
 
     async def _dispatch(self, event: AstrMessageEvent, op: str, gid, toks: list) -> Tuple[bool, str]:
         if op == "timeout":
@@ -1324,7 +1336,7 @@ class GroupMasterPlugin(Star):
 
     @filter.command("g")
     async def cmd_g(self, event: AstrMessageEvent):
-        """g nn <新群名>：群操作。"""
+        """g nn/name <新群名> 或 g card <@用户/QQ号> <新名片>：群操作。"""
         async for r in self._run_command(event, "g"):
             yield r
 
@@ -1935,23 +1947,6 @@ class GroupMasterPlugin(Star):
             ok, msg = False, f"异常: {e}"
         return ("✅ " if ok else "❌ ") + msg
 
-    @llm_tool(name="gm_send_group_notice")
-    async def tool_send_notice(self, event: AstrMessageEvent, content: str):
-        """发布当前群公告。content 为公告内容。仅群聊可用。"""
-        gid = self._llm_group_gate(event)
-        if not gid:
-            return "该操作仅能在群聊中使用。"
-        err = await self._llm_perm_gate(event)
-        if err:
-            return err
-        try:
-            toks = [str(content)]
-            ok, msg = await self._do_bc(event, gid, toks)
-        except Exception as e:
-            ok, msg = False, f"异常: {e}"
-        return ("✅ " if ok else "❌ ") + msg
-
-
 
     async def initialize(self):
         """插件加载后启动后台任务。"""
@@ -1960,7 +1955,7 @@ class GroupMasterPlugin(Star):
         task = asyncio.create_task(self._mute_renewal_ticker())
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
-        logger.info(f"{LOG} 插件已加载 v1.1.0，后台任务已启动")
+        logger.info(f"{LOG} 插件已加载 v1.1.1，后台任务已启动")
 
     async def _mute_renewal_ticker(self):
         """后台任务：每分钟检查超长禁言续期。"""
@@ -2040,8 +2035,7 @@ class GroupMasterPlugin(Star):
                     return
                 msg = wel_conf.get("msg", "欢迎 {user} 加入本群！")
                 msg = msg.replace("{user}", f"[CQ:at,qq={new_uid}]")
-                ob = self._ob(event)
-                await ob.call("send_group_msg", group_id=int(gid), message=msg)
+                await self._ob(event, "send_group_msg", group_id=int(gid), message=msg)
             except Exception as e:
                 logger.warning(f"{LOG} 发送欢迎消息失败: {e}")
         
@@ -2065,8 +2059,7 @@ class GroupMasterPlugin(Star):
                     return
                 msg = bye_conf.get("msg", "{user} 离开了本群")
                 msg = msg.replace("{user}", left_uid)
-                ob = self._ob(event)
-                await ob.call("send_group_msg", group_id=int(gid), message=msg)
+                await self._ob(event, "send_group_msg", group_id=int(gid), message=msg)
             except Exception as e:
                 logger.warning(f"{LOG} 发送退群提示失败: {e}")
 
@@ -2087,9 +2080,8 @@ class GroupMasterPlugin(Star):
                 if word in msg_text:
                     try:
                         dur = sw_conf.get("duration", DEFAULT_SW_DURATION)
-                        ob = self._ob(event)
-                        await ob.call("delete_msg", message_id=event.message_obj.message_id)
-                        await ob.call("set_group_ban", group_id=int(gid), user_id=int(uid), duration=dur)
+                        await self._ob(event, "delete_msg", message_id=event.message_obj.message_id)
+                        await self._ob(event, "set_group_ban", group_id=int(gid), user_id=int(uid), duration=dur)
                         logger.info(f"{LOG} 敏感词触发：群{gid} 用户{uid} 触发[{word}]，禁言{dur}秒")
                     except Exception as e:
                         logger.warning(f"{LOG} 敏感词处理失败: {e}")
@@ -2111,8 +2103,7 @@ class GroupMasterPlugin(Star):
             
             if len(user_msgs) >= threshold:
                 try:
-                    ob = self._ob(event)
-                    await ob.call("set_group_ban", group_id=int(gid), user_id=int(uid), duration=600)
+                    await self._ob(event, "set_group_ban", group_id=int(gid), user_id=int(uid), duration=600)
                     logger.info(f"{LOG} 刷屏触发：群{gid} 用户{uid} {window}秒内{len(user_msgs)}条消息")
                     user_msgs.clear()
                 except Exception as e:
@@ -2135,14 +2126,13 @@ class GroupMasterPlugin(Star):
             if score >= threshold:
                 action = ad_conf.get("action", "mute")
                 try:
-                    ob = self._ob(event)
-                    await ob.call("delete_msg", message_id=event.message_obj.message_id)
+                    await self._ob(event, "delete_msg", message_id=event.message_obj.message_id)
                     if action == "ban":
-                        await ob.call("set_group_kick", group_id=int(gid), user_id=int(uid), reject_add_request=True)
+                        await self._ob(event, "set_group_kick", group_id=int(gid), user_id=int(uid), reject_add_request=True)
                     elif action == "kick":
-                        await ob.call("set_group_kick", group_id=int(gid), user_id=int(uid))
+                        await self._ob(event, "set_group_kick", group_id=int(gid), user_id=int(uid))
                     else:  # mute
-                        await ob.call("set_group_ban", group_id=int(gid), user_id=int(uid), duration=3600)
+                        await self._ob(event, "set_group_ban", group_id=int(gid), user_id=int(uid), duration=3600)
                     logger.info(f"{LOG} 广告拦截：群{gid} 用户{uid} 评分{score}，执行{action}")
                 except Exception as e:
                     logger.warning(f"{LOG} 广告处理失败: {e}")

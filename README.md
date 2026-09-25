@@ -27,6 +27,7 @@
 - 👋 **欢迎/退群**：`wel` 配置入群欢迎消息，`bye` 配置退群提示
 - 📣 **群公告/改名**：`bc` 发送群公告，`g` 修改群名片/群名称
 - 👤 **名片检测**：`cardcheck` 开启后自动检测新成员名片合规性
+- 🔧 **v1.1.1 修复**：修复 11 处群操作调用错误（`g`/`unmute`/`muteall`/`mutelist`/`title`/`bc`/入退群播报等此前必然失败）；`g name`（简写 `g nn`）改名与 `g card` 改名片现已可用。
 
 ## 📦 安装
 
@@ -108,7 +109,7 @@ git clone https://github.com/WolfeOvO/astrbot_plugin_groupmaster
 | `bye on/off` | 开启/关闭退群提示 |
 | `bye set <消息>` | 设置退群消息（`{user}` 会替换为 QQ 号） |
 | `bc <公告内容>` | 发送群公告 |
-| `g name <新群名>` | 修改群名称 |
+| `g name <新群名>`（简写 `g nn`） | 修改群名称 |
 | `g card <@用户> <新名片>` | 修改群成员名片 |
 
 ### 跨群批量（`all` 子命令）
