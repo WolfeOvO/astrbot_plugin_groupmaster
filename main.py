@@ -1,5 +1,5 @@
 """
-AstrBot 群管插件 astrbot_plugin_groupmaster v1.1.1
+AstrBot 群管插件 astrbot_plugin_groupmaster v1.1.2
 
 命令（仅群聊可用；仅本群群主/管理员可使用；群内需 @Bot 或唤醒前缀触发；"@"目标也可以直接输 QQ 号）：
   timeout [all] <秒数> <@用户>   禁言指定用户（秒）；all=机器人管理的所有群
@@ -231,7 +231,7 @@ def find_reply_id(event: AstrMessageEvent) -> Optional[str]:
     "astrbot_plugin_groupmaster",
     "Wolfe",
     "QQ群管插件：timeout/kick/ban/warn/recall/mute/admin/status，支持@或QQ号定位、理由记录、跨群 all 批量执行与 LLM 自然语言兜底；仅群聊可用，仅本群群主/管理员可使用。",
-    "1.1.1",
+    "1.1.2",
     "",
 )
 class GroupMasterPlugin(Star):
@@ -1354,7 +1354,13 @@ class GroupMasterPlugin(Star):
 
     @llm_tool(name="gm_timeout_user")
     async def tool_timeout(self, event: AstrMessageEvent, user_id: str, duration_sec: int = 600, reason: str = ""):
-        """禁言当前群内指定用户。user_id 为目标 QQ 号，duration_sec 为禁言秒数（0~2592000，0 表示解除禁言），reason 为可选理由（记入 status 展示）。仅群聊可用。"""
+        """禁言当前群内指定用户。user_id 为目标 QQ 号，duration_sec 为禁言秒数（0~2592000，0 表示解除禁言），reason 为可选理由（记入 status 展示）。仅群聊可用。
+
+        Args:
+            user_id (str): 目标用户 QQ 号（纯数字）
+            duration_sec (int): 禁言秒数（0~2592000；0 表示解除禁言）
+            reason (str): 可选理由，会记入群管档案（status 可查）
+        """
         gid = self._llm_group_gate(event)
         if not gid:
             return "该操作仅能在群聊中使用。"
@@ -1369,7 +1375,12 @@ class GroupMasterPlugin(Star):
 
     @llm_tool(name="gm_kick_user")
     async def tool_kick(self, event: AstrMessageEvent, user_id: str, reason: str = ""):
-        """将当前群内指定用户移出群聊（不拉黑）。user_id 为目标 QQ 号，reason 为可选理由（记入状态档案，status 可查）。仅群聊可用。"""
+        """将当前群内指定用户移出群聊（不拉黑）。user_id 为目标 QQ 号，reason 为可选理由（记入状态档案，status 可查）。仅群聊可用。
+
+        Args:
+            user_id (str): 目标用户 QQ 号（纯数字）
+            reason (str): 可选理由，会记入群管档案（status 可查）
+        """
         gid = self._llm_group_gate(event)
         if not gid:
             return "该操作仅能在群聊中使用。"
@@ -1384,7 +1395,12 @@ class GroupMasterPlugin(Star):
 
     @llm_tool(name="gm_ban_user")
     async def tool_ban(self, event: AstrMessageEvent, user_id: str, reason: str = ""):
-        """将当前群内指定用户移出群聊并拉黑（自动拒绝其后续入群申请）。user_id 为目标 QQ 号，reason 为可选理由（记入状态档案，status 可查）。仅群聊可用。"""
+        """将当前群内指定用户移出群聊并拉黑（自动拒绝其后续入群申请）。user_id 为目标 QQ 号，reason 为可选理由（记入状态档案，status 可查）。仅群聊可用。
+
+        Args:
+            user_id (str): 目标用户 QQ 号（纯数字）
+            reason (str): 可选理由，会记入群管档案（status 可查）
+        """
         gid = self._llm_group_gate(event)
         if not gid:
             return "该操作仅能在群聊中使用。"
@@ -1399,7 +1415,11 @@ class GroupMasterPlugin(Star):
 
     @llm_tool(name="gm_unban_user")
     async def tool_unban(self, event: AstrMessageEvent, user_id: str):
-        """解除当前群内指定用户的拉黑（允许其重新申请入群）。user_id 为目标 QQ 号。仅群聊可用。"""
+        """解除当前群内指定用户的拉黑（允许其重新申请入群）。user_id 为目标 QQ 号。仅群聊可用。
+
+        Args:
+            user_id (str): 目标用户 QQ 号（纯数字）
+        """
         gid = self._llm_group_gate(event)
         if not gid:
             return "该操作仅能在群聊中使用。"
@@ -1414,7 +1434,12 @@ class GroupMasterPlugin(Star):
 
     @llm_tool(name="gm_warn_user")
     async def tool_warn(self, event: AstrMessageEvent, user_id: str, reason: str = ""):
-        """给当前群内指定用户记一次警告；达到上限自动移出群聊。user_id 为目标 QQ 号，reason 为可选理由（记入状态档案，status 可查）。仅群聊可用。"""
+        """给当前群内指定用户记一次警告；达到上限自动移出群聊。user_id 为目标 QQ 号，reason 为可选理由（记入状态档案，status 可查）。仅群聊可用。
+
+        Args:
+            user_id (str): 目标用户 QQ 号（纯数字）
+            reason (str): 可选理由，会记入群管档案（status 可查）
+        """
         gid = self._llm_group_gate(event)
         if not gid:
             return "该操作仅能在群聊中使用。"
@@ -1429,7 +1454,12 @@ class GroupMasterPlugin(Star):
 
     @llm_tool(name="gm_recall_user_messages")
     async def tool_recall(self, event: AstrMessageEvent, user_id: str = "", count: int = 1):
-        """撤回当前群内的消息。引用某条消息并让模型调用本工具=撤回该条引用消息；否则撤回 user_id（目标 QQ 号）最近的 count 条消息（1~50）。仅群聊可用。"""
+        """撤回当前群内的消息。引用某条消息并让模型调用本工具=撤回该条引用消息；否则撤回 user_id（目标 QQ 号）最近的 count 条消息（1~50）。仅群聊可用。
+
+        Args:
+            user_id (str): 目标用户 QQ 号（纯数字）
+            count (int): 撤回条数（1~50）
+        """
         gid = self._llm_group_gate(event)
         if not gid:
             return "该操作仅能在群聊中使用。"
@@ -1460,7 +1490,12 @@ class GroupMasterPlugin(Star):
 
     @llm_tool(name="gm_set_admin")
     async def tool_admin(self, event: AstrMessageEvent, user_id: str, grant: bool = True):
-        """设置/取消当前群内指定用户的群管理员（需机器人为群主）。user_id 为目标 QQ 号；grant=True 设为管理员，False 取消。仅群聊可用。"""
+        """设置/取消当前群内指定用户的群管理员（需机器人为群主）。user_id 为目标 QQ 号；grant=True 设为管理员，False 取消。仅群聊可用。
+
+        Args:
+            user_id (str): 目标用户 QQ 号（纯数字）
+            grant (bool): True=设为管理员；False=取消管理员
+        """
         gid = self._llm_group_gate(event)
         if not gid:
             return "该操作仅能在群聊中使用。"
@@ -1475,7 +1510,11 @@ class GroupMasterPlugin(Star):
 
     @llm_tool(name="gm_status")
     async def tool_status(self, event: AstrMessageEvent, user_id: str = ""):
-        """查询当前群的管理状态：无 user_id=全群总览（谁被禁言/禁言剩余、警告计数、拉黑名单与理由）；带 user_id（QQ 号）=该用户在本群的档案。仅群聊可用。"""
+        """查询当前群的管理状态：无 user_id=全群总览（谁被禁言/禁言剩余、警告计数、拉黑名单与理由）；带 user_id（QQ 号）=该用户在本群的档案。仅群聊可用。
+
+        Args:
+            user_id (str): 可选：目标 QQ 号（省略则看全群总览）
+        """
         gid = self._llm_group_gate(event)
         if not gid:
             return "该操作仅能在群聊中使用。"
@@ -1493,7 +1532,11 @@ class GroupMasterPlugin(Star):
 
     @llm_tool(name="gm_set_warn_max")
     async def tool_warn_max(self, event: AstrMessageEvent, max_count: int):
-        """设定当前群管系统的全局警告次数上限（用户被警告达到该次数自动移出群聊）。max_count 为正整数。仅群聊可用。"""
+        """设定当前群管系统的全局警告次数上限（用户被警告达到该次数自动移出群聊）。max_count 为正整数。仅群聊可用。
+
+        Args:
+            max_count (int): 警告次数上限（正整数）
+        """
         gid = self._llm_group_gate(event)
         if not gid:
             return "该操作仅能在群聊中使用。"
@@ -1511,7 +1554,11 @@ class GroupMasterPlugin(Star):
 
     @llm_tool(name="gm_clear_warn")
     async def tool_warn_clear(self, event: AstrMessageEvent, user_id: str):
-        """清除当前群内指定用户的警告计数（撤销误警告）。user_id 为目标 QQ 号。仅群聊可用。"""
+        """清除当前群内指定用户的警告计数（撤销误警告）。user_id 为目标 QQ 号。仅群聊可用。
+
+        Args:
+            user_id (str): 目标用户 QQ 号（纯数字）
+        """
         gid = self._llm_group_gate(event)
         if not gid:
             return "该操作仅能在群聊中使用。"
@@ -1568,7 +1615,11 @@ class GroupMasterPlugin(Star):
 
     @llm_tool(name="gm_get_member_info")
     async def tool_get_member_info(self, event: AstrMessageEvent, user_id: str):
-        """查询当前群内指定成员的详细信息（群名片、角色、加群时间、最后发言等）。user_id 为目标 QQ 号。仅群聊可用。"""
+        """查询当前群内指定成员的详细信息（群名片、角色、加群时间、最后发言等）。user_id 为目标 QQ 号。仅群聊可用。
+
+        Args:
+            user_id (str): 目标用户 QQ 号（纯数字）
+        """
         gid = self._llm_group_gate(event)
         if not gid:
             return "该操作仅能在群聊中使用。"
@@ -1609,7 +1660,11 @@ class GroupMasterPlugin(Star):
 
     @llm_tool(name="gm_get_member_list")
     async def tool_get_member_list(self, event: AstrMessageEvent, limit: int = 30):
-        """获取当前群的成员列表（默认 30 个，最多 200）。返回 QQ 号 + 群名片 + 角色。仅群聊可用。"""
+        """获取当前群的成员列表（默认 30 个，最多 200）。返回 QQ 号 + 群名片 + 角色。仅群聊可用。
+
+        Args:
+            limit (int): 返回条数上限（默认 30，最多 200）
+        """
         gid = self._llm_group_gate(event)
         if not gid:
             return "该操作仅能在群聊中使用。"
@@ -1639,7 +1694,12 @@ class GroupMasterPlugin(Star):
 
     @llm_tool(name="gm_get_msg_history")
     async def tool_get_msg_history(self, event: AstrMessageEvent, count: int = 20, user_id: str = ""):
-        """读取当前群最近的消息历史（默认 20 条，最多 100）。可选 user_id 只看某用户的消息。仅群聊可用。"""
+        """读取当前群最近的消息历史（默认 20 条，最多 100）。可选 user_id 只看某用户的消息。仅群聊可用。
+
+        Args:
+            count (int): 读取的最近消息条数（默认 20，最多 100）
+            user_id (str): 目标用户 QQ 号（纯数字）
+        """
         gid = self._llm_group_gate(event)
         if not gid:
             return "该操作仅能在群聊中使用。"
@@ -1697,7 +1757,12 @@ class GroupMasterPlugin(Star):
 
     @llm_tool(name="gm_at_member")
     async def tool_at_member(self, event: AstrMessageEvent, user_id: str, text: str = ""):
-        """在当前群中以 At 形式发一条消息 @ 指定成员。user_id 为目标 QQ 号，text 为附带文本（可空）。仅群聊可用。"""
+        """在当前群中以 At 形式发一条消息 @ 指定成员。user_id 为目标 QQ 号，text 为附带文本（可空）。仅群聊可用。
+
+        Args:
+            user_id (str): 目标用户 QQ 号（纯数字）
+            text (str): 附带文本，可为空字符串
+        """
         gid = self._llm_group_gate(event)
         if not gid:
             return "该操作仅能在群聊中使用。"
@@ -1717,7 +1782,11 @@ class GroupMasterPlugin(Star):
 
     @llm_tool(name="gm_at_all")
     async def tool_at_all(self, event: AstrMessageEvent, text: str = ""):
-        """在当前群中 @全体成员（需机器人具备管理员或群主身份）。text 为附带文本（可空）。仅群聊可用。"""
+        """在当前群中 @全体成员（需机器人具备管理员或群主身份）。text 为附带文本（可空）。仅群聊可用。
+
+        Args:
+            text (str): 附带文本，可为空字符串
+        """
         gid = self._llm_group_gate(event)
         if not gid:
             return "该操作仅能在群聊中使用。"
@@ -1737,7 +1806,12 @@ class GroupMasterPlugin(Star):
 
     @llm_tool(name="gm_set_group_card")
     async def tool_set_card(self, event: AstrMessageEvent, user_id: str, card: str = ""):
-        """修改当前群内指定成员的群名片。user_id 为目标 QQ 号，card 为新群名片（空字符串=清空）。仅群聊可用。"""
+        """修改当前群内指定成员的群名片。user_id 为目标 QQ 号，card 为新群名片（空字符串=清空）。仅群聊可用。
+
+        Args:
+            user_id (str): 目标用户 QQ 号（纯数字）
+            card (str): 新群名片内容（空字符串=清空名片）
+        """
         gid = self._llm_group_gate(event)
         if not gid:
             return "该操作仅能在群聊中使用。"
@@ -1758,7 +1832,11 @@ class GroupMasterPlugin(Star):
 
     @llm_tool(name="gm_set_group_essence")
     async def tool_set_essence(self, event: AstrMessageEvent, message_id: str):
-        """将指定消息设为群精华（再次调用同一 message_id 取消精华）。message_id 为消息 ID（可从 get_msg_history 获取）。仅群聊可用。"""
+        """将指定消息设为群精华（再次调用同一 message_id 取消精华）。message_id 为消息 ID（可从 get_msg_history 获取）。仅群聊可用。
+
+        Args:
+            message_id (str): 消息 ID（可用 gm_get_msg_history 获取）
+        """
         gid = self._llm_group_gate(event)
         if not gid:
             return "该操作仅能在群聊中使用。"
@@ -1785,7 +1863,11 @@ class GroupMasterPlugin(Star):
 
     @llm_tool(name="gm_send_group_notice")
     async def tool_send_notice(self, event: AstrMessageEvent, content: str):
-        """在当前群发布一条群公告。content 为公告内容（建议 50 字以内）。仅群聊可用。"""
+        """在当前群发布一条群公告。content 为公告内容（建议 50 字以内）。仅群聊可用。
+
+        Args:
+            content (str): 公告内容（建议 50 字以内）
+        """
         gid = self._llm_group_gate(event)
         if not gid:
             return "该操作仅能在群聊中使用。"
@@ -1902,7 +1984,11 @@ class GroupMasterPlugin(Star):
 
     @llm_tool(name="gm_unmute_user")
     async def tool_unmute(self, event: AstrMessageEvent, user_id: str):
-        """解除当前群内指定用户的禁言。user_id 为目标 QQ 号。仅群聊可用。"""
+        """解除当前群内指定用户的禁言。user_id 为目标 QQ 号。仅群聊可用。
+
+        Args:
+            user_id (str): 目标用户 QQ 号（纯数字）
+        """
         gid = self._llm_group_gate(event)
         if not gid:
             return "该操作仅能在群聊中使用。"
@@ -1917,7 +2003,11 @@ class GroupMasterPlugin(Star):
 
     @llm_tool(name="gm_muteall_toggle")
     async def tool_muteall(self, event: AstrMessageEvent, duration_sec: int = 0):
-        """开启/关闭当前群全员禁言。duration_sec=0 表示关闭，>0 表示开启（注意：QQ 全员禁言需手动关闭）。仅群聊可用。"""
+        """开启/关闭当前群全员禁言。duration_sec=0 表示关闭，>0 表示开启（注意：QQ 全员禁言需手动关闭）。仅群聊可用。
+
+        Args:
+            duration_sec (int): 时长秒数：0=关闭全员禁言，>0=开启
+        """
         gid = self._llm_group_gate(event)
         if not gid:
             return "该操作仅能在群聊中使用。"
@@ -1932,7 +2022,12 @@ class GroupMasterPlugin(Star):
 
     @llm_tool(name="gm_set_title")
     async def tool_set_title(self, event: AstrMessageEvent, user_id: str, title: str):
-        """设置当前群内指定用户的头衔。user_id 为目标 QQ 号，title 为头衔文本。仅群聊可用。"""
+        """设置当前群内指定用户的头衔。user_id 为目标 QQ 号，title 为头衔文本。仅群聊可用。
+
+        Args:
+            user_id (str): 目标用户 QQ 号（纯数字）
+            title (str): 头衔文本（建议 20 字以内）
+        """
         gid = self._llm_group_gate(event)
         if not gid:
             return "该操作仅能在群聊中使用。"
@@ -1955,7 +2050,7 @@ class GroupMasterPlugin(Star):
         task = asyncio.create_task(self._mute_renewal_ticker())
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
-        logger.info(f"{LOG} 插件已加载 v1.1.1，后台任务已启动")
+        logger.info(f"{LOG} 插件已加载 v1.1.2，后台任务已启动")
 
     async def _mute_renewal_ticker(self):
         """后台任务：每分钟检查超长禁言续期。"""

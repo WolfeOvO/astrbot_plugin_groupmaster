@@ -1,6 +1,6 @@
 name: astrbot_plugin_groupmaster
 author: Wolfe
-desc: QQ群管插件：timeout/kick/ban/warn/recall/mute/admin/status，支持@或QQ号定位、理由记录、跨群 all 批量执行与 LLM 自然语言兜底；仅群聊可用，仅本群群主/管理员可使用。v1.1.0 新增：unmute/mutelist/muteall/banlist/title（头衔）、超长禁言自动续期（最长365天）、敏感词/刷屏/广告检测拦截、名片检测、欢迎/退群消息、群公告/改名。v1.1.1：修复 11 处群操作调用错误（g/unmute/muteall/mutelist/title/bc 等此前必然失败）；g 支持 nn/name 改名与 card 改名片。
-version: 1.1.1
+desc: QQ群管插件：timeout/kick/ban/warn/recall/mute/admin/status，支持@或QQ号定位、理由记录、跨群 all 批量执行与 LLM 自然语言兜底；仅群聊可用，仅本群群主/管理员可使用。v1.1.0 新增：unmute/mutelist/muteall/banlist/title（头衔）、超长禁言自动续期（最长365天）、敏感词/刷屏/广告检测拦截、名片检测、欢迎/退群消息、群公告/改名。v1.1.1：修复 11 处群操作调用错误（g/unmute/muteall/mutelist/title/bc 等此前必然失败）；g 支持 nn/name 改名与 card 改名片。v1.1.2：修复 21 个 llm_tool 参数文档缺失（@Bot 自然语言调用恢复可用）。
+version: 1.1.2
 astrbot_version: ">=4.26"
 repo: https://github.com/WolfeOvO/astrbot_plugin_groupmaster
